@@ -4,7 +4,7 @@
 실제 빗썸 서버에 연결하지 않고 클라이언트 로직 자체를 검증.
 실제 연결 테스트는 test_bithumb_live.py 에서 별도로 수행 (사용자 환경에서).
 
-검증 시나리오 16가지:
+검증 시나리오 17가지:
 1. 클라이언트 초기화
 2. Public API 응답 파싱 (ticker)
 3. 캔들 데이터 파싱 (OHLCV)
@@ -21,6 +21,7 @@
 14. 잘못된 ord_type 조합 거부
 15. Config 거래 모드에 따른 dry-run 자동 설정
 16. 실주문 이중 안전장치
+17. 주문 리스트 조회 파라미터
 """
 import sys
 import os
@@ -579,6 +580,41 @@ def test_live_order_requires_explicit_enable():
     print("  ✓ 차단된 주문은 네트워크 호출 0번")
 
 
+def test_get_orders_query_params():
+    print("\n[테스트 17] 주문 리스트 조회 파라미터")
+    print("-" * 60)
+
+    client = BithumbClient(TEST_API_KEY, TEST_SECRET_KEY)
+    done_order = {
+        **MOCK_ORDER_RESPONSE,
+        "state": "done",
+        "executed_volume": "0.001",
+        "remaining_volume": "0",
+    }
+
+    with patch.object(client._session, 'request') as mock_req:
+        mock_req.return_value = make_mock_response([done_order])
+        orders = client.get_orders(
+            market='KRW-BTC',
+            state='done',
+            limit=5,
+            page=2,
+            order_by='asc',
+        )
+
+    assert len(orders) == 1
+    assert orders[0].state == OrderState.DONE
+    params = mock_req.call_args.kwargs["params"]
+    assert params["market"] == "KRW-BTC"
+    assert params["state"] == "done"
+    assert params["limit"] == 5
+    assert params["page"] == 2
+    assert params["order_by"] == "asc"
+
+    print("  ✓ /v1/orders 조회 파라미터 구성 정상")
+    print("  ✓ done 주문 응답 파싱 정상")
+
+
 # ============================================================
 # 메인 실행
 # ============================================================
@@ -605,6 +641,7 @@ def main():
         test_invalid_ord_type_combinations,
         test_from_config_controls_dry_run,
         test_live_order_requires_explicit_enable,
+        test_get_orders_query_params,
     ]
     
     passed = 0

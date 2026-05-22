@@ -132,7 +132,7 @@ ETH/Cash Regime은 2024년 말 이후 ETH 단순보유가 크게 흔들린 구�
 - 최대 주문금액, 최대 ETH 평가금액, 최소 주문금액, 미체결 주문, 호가 스프레드 게이트를 강제
 - 기본 프로필은 4시간봉 `intraday4h`이며 `--loop`, `--interval-minutes`, `--cooldown-minutes`, `--max-orders-per-day`로 반복 주기를 제어
 - 계좌 위험 게이트가 일일 손실, 주간 손실, MDD, 킬스위치 파일(`logs/KILL_SWITCH_ACTIVE`)을 주문 직전에 강제
-- `DISCORD_WEBHOOK_URL`이 설정되어 있으면 LIVE 주문, 위험 차단, 러너 오류를 Discord로 알림
+- `DISCORD_WEBHOOK_URL`이 설정되어 있으면 LIVE 주문, 위험 차단, 러너 오류, 주기적 상태 리포트를 Discord로 알림
 - 시장가 매수는 KRW 금액만, 시장가 매도는 ETH 수량만 전송하는 빗썸 V2 비대칭 규칙 준수
 
 ## Discord 알림
@@ -142,4 +142,22 @@ Discord 서버에서 알림 채널을 만든 뒤 Server Settings → Integration
 - LIVE 주문 요청 성공 시 주문 방향, 마켓, 금액/수량, 계좌 평가액, 주문 UUID 알림
 - 위험 게이트 차단 시 차단 사유와 계좌 평가액 알림
 - 러너 오류 발생 시 에러 타입과 메시지 알림
+- `--status-alert-interval-minutes 30`을 붙이면 시세, 자산, 최근 체결/취소/미체결 주문 요약을 30분마다 알림
 - dry-run 알림은 기본 비활성화이며 `--notify-dry-run`을 붙였을 때만 전송
+
+수동으로 Discord 조회 리포트를 보내려면:
+
+```bash
+python scripts/send_discord_status.py --report all --no-file-log
+python scripts/send_discord_status.py --report price --no-file-log
+python scripts/send_discord_status.py --report assets --no-file-log
+python scripts/send_discord_status.py --report orders --no-file-log
+```
+
+Discord 채널에서 직접 조회하려면 Bot Token과 Channel ID를 `.env`에 추가한 뒤 조회봇을 실행합니다.
+
+```bash
+python scripts/run_discord_query_bot.py --no-file-log
+```
+
+지원 명령: `!q status`, `!q price`, `!q assets`, `!q orders`, `!q help`

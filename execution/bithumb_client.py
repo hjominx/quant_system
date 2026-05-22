@@ -687,6 +687,50 @@ class BithumbClient:
             requires_auth=True,
         )
         return [Order.from_dict(d) for d in data]
+
+    def get_orders(
+        self,
+        market: Optional[str] = None,
+        state: Optional[str] = None,
+        limit: int = 20,
+        page: int = 1,
+        order_by: str = "desc",
+    ) -> List[Order]:
+        """주문 목록 조회.
+
+        Args:
+            market: 'KRW-BTC' 같은 마켓 코드. None이면 전체.
+            state: wait/watch/done/cancel 중 하나. None이면 빗썸 기본값(wait).
+            limit: 조회 개수. 빗썸 기본/최대 범위 안에서 보수적으로 1~100만 허용.
+            page: 페이지 번호.
+            order_by: desc(최신순) 또는 asc(오래된순).
+        """
+        if state is not None and state not in {"wait", "watch", "done", "cancel"}:
+            raise ValueError(f"지원하지 않는 주문 상태: {state}")
+        if not 1 <= limit <= 100:
+            raise ValueError("limit은 1~100 사이여야 합니다.")
+        if page < 1:
+            raise ValueError("page는 1 이상이어야 합니다.")
+        if order_by not in {"asc", "desc"}:
+            raise ValueError("order_by는 asc 또는 desc여야 합니다.")
+
+        params = {
+            "limit": limit,
+            "page": page,
+            "order_by": order_by,
+        }
+        if market:
+            params["market"] = market
+        if state:
+            params["state"] = state
+
+        data = self._request(
+            "GET",
+            "/v1/orders",
+            params=params,
+            requires_auth=True,
+        )
+        return [Order.from_dict(d) for d in data]
     
     def cancel_order(self, uuid: str) -> Order:
         """주문 취소"""

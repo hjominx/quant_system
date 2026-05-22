@@ -33,6 +33,8 @@ from scripts.run_eth_cash_micro_live import (
     calculate_buy_amount,
     calculate_sell_volume,
     record_order,
+    record_status_alert,
+    status_alert_due,
     strategy_params_for_profile,
     validate_live_permission,
 )
@@ -444,6 +446,27 @@ def test_corrupt_risk_state_fails_closed():
     print("  ✓ 위험 상태 파일 손상 시 주문 전 차단")
 
 
+def test_status_alert_interval_state():
+    print("\n[테스트 15] Discord 상태 알림 주기")
+    print("-" * 60)
+
+    now = datetime(2026, 5, 22, 9, 0, 0)
+    state = PilotState(date="2026-05-22", orders_today=2)
+
+    assert status_alert_due(state, now, 30) is True
+    updated = record_status_alert(state, now)
+    assert updated.orders_today == 2
+    assert updated.last_status_alert_at == now.isoformat(timespec="seconds")
+    assert status_alert_due(updated, now + timedelta(minutes=29), 30) is False
+    assert status_alert_due(updated, now + timedelta(minutes=30), 30) is True
+
+    ordered = record_order(updated, now + timedelta(minutes=31))
+    assert ordered.last_status_alert_at == updated.last_status_alert_at
+    assert ordered.orders_today == 3
+
+    print("  ✓ 상태 알림 주기와 주문 카운터 보존 정상")
+
+
 def main():
     print("=" * 60)
     print("ETH/Cash Micro Live 안전 테스트")
@@ -464,6 +487,7 @@ def main():
         test_kill_switch_blocks_all_orders,
         test_risk_state_round_trip,
         test_corrupt_risk_state_fails_closed,
+        test_status_alert_interval_state,
     ]
 
     passed = 0

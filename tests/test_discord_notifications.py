@@ -10,17 +10,23 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from notifications.discord import (
+    DiscordBotClient,
     COLOR_SUCCESS,
     DiscordEmbed,
     DiscordField,
+    DiscordMessage,
     DiscordNotificationError,
     DiscordNotifier,
 )
 
 
 class FakeResponse:
-    def __init__(self, status_code: int):
+    def __init__(self, status_code: int, payload=None):
         self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        return self._payload
 
 
 def test_disabled_notifier_does_not_send():
@@ -90,6 +96,43 @@ def test_discord_error_is_explicit():
     print("  ✓ Discord 실패 응답은 명시적 에러")
 
 
+def test_bot_client_fetch_and_send_payload_without_leaking_token():
+    print("\n[테스트 5] Bot REST 조회/응답 payload")
+    print("-" * 60)
+
+    token = "bot_secret_token"
+    channel_id = "1507376205693845654"
+    bot = DiscordBotClient(token, channel_id)
+    payload = [{
+        "id": "123",
+        "content": "!q status",
+        "author": {"id": "456", "bot": False},
+    }]
+
+    with patch("notifications.discord.requests.get", return_value=FakeResponse(200, payload)) as get:
+        messages = bot.get_recent_messages(limit=1)
+
+    assert len(messages) == 1
+    assert isinstance(messages[0], DiscordMessage)
+    assert messages[0].content == "!q status"
+    assert get.call_args.kwargs["headers"]["Authorization"] == f"Bot {token}"
+
+    embed = DiscordEmbed(
+        title="Query status",
+        description="ok",
+        fields=(DiscordField("Market", "KRW-ETH"),),
+    )
+    with patch("notifications.discord.requests.post", return_value=FakeResponse(201)) as post:
+        sent = bot.send(embeds=(embed,))
+
+    assert sent is True
+    assert token not in str(post.call_args.kwargs["json"])
+    assert post.call_args.kwargs["json"]["embeds"][0]["title"] == "Query status"
+
+    print("  ✓ Bot 메시지 조회/응답 REST 호출 정상")
+    print("  ✓ Bot token은 메시지 payload에 포함되지 않음")
+
+
 def main():
     print("=" * 60)
     print("Discord 알림 테스트")
@@ -100,6 +143,7 @@ def main():
         test_invalid_webhook_url_is_rejected,
         test_send_embed_payload_without_leaking_url,
         test_discord_error_is_explicit,
+        test_bot_client_fetch_and_send_payload_without_leaking_token,
     ]
 
     passed = 0

@@ -45,6 +45,11 @@ from notifications.discord import (
     DiscordField,
     DiscordNotifier,
 )
+from notifications.discord_status import (
+    AccountSnapshot,
+    build_snapshot_embeds,
+    fetch_krw_prices_for_balances,
+)
 from risk.live_guard import (
     RiskLimits,
     RiskGateError,
@@ -84,6 +89,7 @@ class PilotState:
     date: str
     orders_today: int = 0
     last_order_at: Optional[str] = None
+    last_status_alert_at: Optional[str] = None
 
 
 def strategy_params_for_profile(profile: str) -> dict:
@@ -129,6 +135,7 @@ def load_pilot_state(path: Path, now: datetime) -> PilotState:
         date=str(raw.get("date", today)),
         orders_today=int(raw.get("orders_today", 0)),
         last_order_at=raw.get("last_order_at"),
+        last_status_alert_at=raw.get("last_status_alert_at"),
     )
     if state.date != today:
         return PilotState(date=today)
@@ -139,11 +146,17 @@ def save_pilot_state(path: Path, state: PilotState) -> None:
     """Persist pilot state for restart-safe cooldown and order limits."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump({
-            "date": state.date,
-            "orders_today": state.orders_today,
-            "last_order_at": state.last_order_at,
-        }, f, ensure_ascii=False, indent=2)
+        json.dump(
+            {
+                "date": state.date,
+                "orders_today": state.orders_today,
+                "last_order_at": state.last_order_at,
+                "last_status_alert_at": state.last_status_alert_at,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
 
 
 def assert_order_quota(
@@ -177,6 +190,19 @@ def record_order(state: PilotState, now: datetime) -> PilotState:
         date=today,
         orders_today=orders_today + 1,
         last_order_at=now.isoformat(timespec="seconds"),
+        last_status_alert_at=state.last_status_alert_at,
+    )
+
+
+def record_status_alert(state: PilotState, now: datetime) -> PilotState:
+    """Return state after sending a scheduled Discord status alert."""
+    today = now.date().isoformat()
+    orders_today = state.orders_today if state.date == today else 0
+    return PilotState(
+        date=today,
+        orders_today=orders_today,
+        last_order_at=state.last_order_at,
+        last_status_alert_at=now.isoformat(timespec="seconds"),
     )
 
 
@@ -418,6 +444,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cooldown-minutes", type=int, default=240)
     parser.add_argument("--max-orders-per-day", type=int, default=4)
     parser.add_argument(
+        "--status-alert-interval-minutes",
+        type=int,
+        default=0,
+        help="Send Discord price/account/order status every N minutes. 0 disables.",
+    )
+    parser.add_argument(
         "--state-file",
         default="logs/eth_cash_micro_live_state.json",
         help="Persistent order counter/cooldown file.",
@@ -453,6 +485,8 @@ def validate_runner_args(args: argparse.Namespace) -> None:
         raise ValueError("--cooldown-minutes는 0 이상이어야 합니다.")
     if args.max_orders_per_day <= 0:
         raise ValueError("--max-orders-per-day는 1 이상이어야 합니다.")
+    if args.status_alert_interval_minutes < 0:
+        raise ValueError("--status-alert-interval-minutes는 0 이상이어야 합니다.")
 
 
 def print_banner(args: argparse.Namespace, dry_run: bool) -> None:
@@ -473,6 +507,7 @@ def print_banner(args: argparse.Namespace, dry_run: bool) -> None:
         f"loop={args.loop} interval={args.interval_minutes}m "
         f"cooldown={args.cooldown_minutes}m max_orders/day={args.max_orders_per_day}"
     )
+    print(f"discord_status_interval={args.status_alert_interval_minutes}m")
     print(f"risk_state={args.risk_state_file} kill_switch={args.kill_switch_file}")
 
 
@@ -554,6 +589,84 @@ def build_error_alert_embed(*, error: Exception, dry_run: bool) -> DiscordEmbed:
         description=f"{type(error).__name__}: {error}",
         color=color,
     )
+
+
+def status_alert_due(state: PilotState, now: datetime, interval_minutes: int) -> bool:
+    """Return True when a scheduled Discord status alert should be sent."""
+    if interval_minutes <= 0:
+        return False
+    if not state.last_status_alert_at:
+        return True
+    last_sent = datetime.fromisoformat(state.last_status_alert_at)
+    return now - last_sent >= timedelta(minutes=interval_minutes)
+
+
+def build_risk_summary(risk_report, risk_limits: RiskLimits) -> str:
+    """Format risk state into one Discord field."""
+    return (
+        f"daily {format_pct(risk_report.daily_loss)}/{format_pct(risk_limits.daily_loss_limit)} | "
+        f"weekly {format_pct(risk_report.weekly_loss)}/{format_pct(risk_limits.weekly_loss_limit)} | "
+        f"MDD {format_pct(risk_report.drawdown)}/{format_pct(risk_limits.max_drawdown_limit)}"
+    )
+
+
+def send_status_alert_if_due(
+    *,
+    client: BithumbClient,
+    notifier: DiscordNotifier,
+    state: PilotState,
+    now: datetime,
+    args: argparse.Namespace,
+    ticker,
+    orderbook,
+    balances: Balances,
+    open_orders: list[Order],
+    decision: TradeDecision,
+    risk_report,
+    risk_limits: RiskLimits,
+) -> PilotState:
+    """Send scheduled Discord price/account/order status without blocking trading."""
+    if not notifier.enabled:
+        return state
+    if not status_alert_due(state, now, args.status_alert_interval_minutes):
+        return state
+
+    try:
+        prices_by_currency = fetch_krw_prices_for_balances(client, balances)
+        filled_orders = tuple(
+            client.get_orders(market=args.market, state="done", limit=5)
+        )
+        canceled_orders = tuple(
+            client.get_orders(market=args.market, state="cancel", limit=5)
+        )
+        snapshot = AccountSnapshot(
+            market=args.market,
+            ticker=ticker,
+            orderbook=orderbook,
+            balances=balances,
+            open_orders=tuple(open_orders),
+            filled_orders=filled_orders,
+            canceled_orders=canceled_orders,
+            prices_by_currency=prices_by_currency,
+        )
+        notifier.send(
+            embeds=build_snapshot_embeds(
+                snapshot,
+                title_prefix="30m LIVE status",
+                orders_today=state.orders_today,
+                max_orders_per_day=args.max_orders_per_day,
+                signal=decision.signal.name,
+                target_weight=decision.target_weight,
+                risk_summary=build_risk_summary(risk_report, risk_limits),
+                kill_switch_active=risk_report.kill_switch_active,
+                timestamp=now,
+            )
+        )
+        print("\nDiscord 30분 상태 알림 전송 완료")
+        return record_status_alert(state, now)
+    except Exception as exc:
+        print(f"\n[알림 오류] Discord 상태 알림 실패: {type(exc).__name__}")
+        return state
 
 
 def run_cycle(
@@ -657,6 +770,24 @@ def run_cycle(
 
     print("\n[파일럿 주문 계획]")
     print(plan)
+
+    updated_state = send_status_alert_if_due(
+        client=client,
+        notifier=notifier,
+        state=state,
+        now=now,
+        args=args,
+        ticker=ticker,
+        orderbook=orderbook,
+        balances=balances,
+        open_orders=open_orders,
+        decision=decision,
+        risk_report=risk_report,
+        risk_limits=risk_limits,
+    )
+    if updated_state != state:
+        save_pilot_state(state_path, updated_state)
+        state = updated_state
 
     if not dry_run:
         save_risk_state(risk_state_path, risk_report.state)
