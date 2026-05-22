@@ -16,7 +16,34 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 from strategies.sma_crossover import SMACrossoverStrategy
+from strategies.base import BaseStrategy, Signal, StrategyContext, TradeDecision
 from backtest.engine import BacktestEngine, BacktestConfig
+
+
+class BuyAndHoldForeverStrategy(BaseStrategy):
+    """강제청산 회귀 테스트용 전략"""
+    
+    def __init__(self):
+        super().__init__(
+            name="BuyAndHoldForever",
+            params={'required_history_days': 1},
+        )
+    
+    def _validate_params(self) -> None:
+        pass
+    
+    def generate_signal(self, ctx: StrategyContext) -> TradeDecision:
+        if ctx.current_position == 0:
+            return TradeDecision(
+                signal=Signal.BUY,
+                target_weight=1.0,
+                reason="테스트용 최초 매수",
+            )
+        return TradeDecision(
+            signal=Signal.HOLD,
+            target_weight=0.0,
+            reason="보유",
+        )
 
 
 def generate_synthetic_ohlcv(n_days: int = 1000, seed: int = 42) -> pd.DataFrame:
@@ -103,6 +130,9 @@ def test_no_lookahead_bias():
     common_dates = result_full.equity_curve.index.intersection(
         result_half.equity_curve.index
     )
+    # 절단된 백테스트의 마지막 날은 종료 강제청산이 반영되므로
+    # 전체 백테스트의 같은 날짜와 비교 대상이 아님.
+    common_dates = common_dates[common_dates < result_half.equity_curve.index[-1]]
     
     full_values = result_full.equity_curve.loc[common_dates]
     half_values = result_half.equity_curve.loc[common_dates]
@@ -194,6 +224,50 @@ def test_buy_and_hold_comparison():
     return result
 
 
+def test_final_liquidation_costs_reflected():
+    """테스트 5: 종료 강제청산 비용이 최종 자산곡선과 거래기록에 반영되는가"""
+    print("\n[테스트 5] 종료 강제청산 비용 반영 검증")
+    print("-" * 60)
+    
+    dates = pd.date_range(start='2024-01-01', periods=12, freq='D')
+    ohlcv = pd.DataFrame({
+        'open': [100.0] * len(dates),
+        'high': [100.0] * len(dates),
+        'low': [100.0] * len(dates),
+        'close': [100.0] * len(dates),
+        'volume': [1_000_000.0] * len(dates),
+    }, index=dates)
+    
+    config = BacktestConfig(
+        initial_capital=10_000_000,
+        commission_rate=0.01,
+        slippage_rate=0.0,
+    )
+    result = BacktestEngine(config).run(
+        BuyAndHoldForeverStrategy(),
+        ohlcv,
+        ticker='TEST',
+    )
+    
+    expected_entry_price = 101.0
+    expected_exit_price = 99.0
+    expected_final_equity = config.initial_capital * (expected_exit_price / expected_entry_price)
+    
+    actual_final_equity = result.equity_curve.iloc[-1]
+    final_diff = abs(actual_final_equity - expected_final_equity)
+    
+    assert len(result.trades) == 1
+    assert abs(result.trades.iloc[0]['entry_price'] - expected_entry_price) < 1e-9
+    assert abs(result.trades.iloc[0]['exit_price'] - expected_exit_price) < 1e-9
+    assert final_diff < 1.0, f"최종 자산 불일치: {actual_final_equity} vs {expected_final_equity}"
+    
+    print(f"  ✓ 진입가 비용 반영: {result.trades.iloc[0]['entry_price']:.2f}")
+    print(f"  ✓ 종료 청산가 비용 반영: {result.trades.iloc[0]['exit_price']:.2f}")
+    print(f"  ✓ 최종 자산곡선 비용 반영: {actual_final_equity:,.0f}원")
+    
+    return result
+
+
 def main():
     print("=" * 60)
     print("백테스트 엔진 검증 테스트 시작")
@@ -204,6 +278,7 @@ def main():
         result2_full, result2_half = test_no_lookahead_bias()
         result3_no, result3_with = test_transaction_costs()
         result4 = test_buy_and_hold_comparison()
+        result5 = test_final_liquidation_costs_reflected()
         
         print("\n" + "=" * 60)
         print("모든 테스트 통과 ✓")

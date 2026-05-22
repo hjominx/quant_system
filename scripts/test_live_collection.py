@@ -34,7 +34,7 @@ def main():
     print(f"\n거래 모드: {cfg.trading_mode.value}")
     
     # 클라이언트
-    client = BithumbClient(cfg.bithumb_api_key, cfg.bithumb_secret_key)
+    client = BithumbClient.from_config(cfg)
     
     # 헬스체크
     print("\n빗썸 서버 헬스체크...")

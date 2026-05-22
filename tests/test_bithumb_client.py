@@ -4,7 +4,7 @@
 실제 빗썸 서버에 연결하지 않고 클라이언트 로직 자체를 검증.
 실제 연결 테스트는 test_bithumb_live.py 에서 별도로 수행 (사용자 환경에서).
 
-검증 시나리오 14가지:
+검증 시나리오 16가지:
 1. 클라이언트 초기화
 2. Public API 응답 파싱 (ticker)
 3. 캔들 데이터 파싱 (OHLCV)
@@ -19,6 +19,8 @@
 12. 영구 에러는 즉시 raise (재시도 안 함)
 13. 시크릿 노출 방지
 14. 잘못된 ord_type 조합 거부
+15. Config 거래 모드에 따른 dry-run 자동 설정
+16. 실주문 이중 안전장치
 """
 import sys
 import os
@@ -35,17 +37,34 @@ from execution.models import (
     Ticker, Candle, Account, Balances, Order, Orderbook,
 )
 from execution.errors import (
+    BithumbError,
     AuthenticationError,
     InvalidRequestError,
     NetworkError,
     ServerError,
     RetryableError,
 )
+from utils.config import Config, TradingMode
 
 
 # 테스트용 더미 키
 TEST_API_KEY = "test_api_key_abcdef1234567890ABCDEF"
 TEST_SECRET_KEY = "test_secret_key_xyz9876543210ZYXWVU"
+
+
+def make_config(trading_mode: TradingMode) -> Config:
+    """테스트용 Config 생성"""
+    return Config(
+        bithumb_api_key=TEST_API_KEY,
+        bithumb_secret_key=TEST_SECRET_KEY,
+        trading_mode=trading_mode,
+        daily_loss_limit=0.03,
+        weekly_loss_limit=0.07,
+        max_drawdown_limit=0.15,
+        max_position_per_coin=0.25,
+        max_total_crypto=0.80,
+        initial_capital=10_000_000,
+    )
 
 
 # ============================================================
@@ -174,12 +193,14 @@ def test_client_initialization():
     assert client.base_url == "https://api.bithumb.com"
     assert client.timeout == 10.0
     assert client.max_retries == 3
-    assert client.dry_run == False
+    assert client.dry_run == True
+    assert client.allow_live_orders == False
     
     print(f"  ✓ 기본 설정 정상")
     print(f"  ✓ base_url: {client.base_url}")
     print(f"  ✓ timeout: {client.timeout}s")
     print(f"  ✓ max_retries: {client.max_retries}")
+    print(f"  ✓ 기본 주문 모드: dry-run")
 
 
 def test_ticker_parsing():
@@ -272,7 +293,7 @@ def test_market_buy_amount_based():
     print("\n[테스트 6] 시장가 매수 — 금액 기반 (빗썸 V2 규칙)")
     print("-" * 60)
     
-    client = BithumbClient(TEST_API_KEY, TEST_SECRET_KEY)
+    client = BithumbClient(TEST_API_KEY, TEST_SECRET_KEY, dry_run=False, allow_live_orders=True)
     
     captured_params = {}
     
@@ -306,7 +327,7 @@ def test_market_sell_volume_based():
     print("\n[테스트 7] 시장가 매도 — 수량 기반 (빗썸 V2 규칙)")
     print("-" * 60)
     
-    client = BithumbClient(TEST_API_KEY, TEST_SECRET_KEY)
+    client = BithumbClient(TEST_API_KEY, TEST_SECRET_KEY, dry_run=False, allow_live_orders=True)
     
     captured_params = {}
     
@@ -338,7 +359,7 @@ def test_limit_order():
     print("\n[테스트 8] 지정가 주문 — volume + price 모두 필요")
     print("-" * 60)
     
-    client = BithumbClient(TEST_API_KEY, TEST_SECRET_KEY)
+    client = BithumbClient(TEST_API_KEY, TEST_SECRET_KEY, dry_run=False, allow_live_orders=True)
     
     captured_params = {}
     
@@ -519,6 +540,45 @@ def test_invalid_ord_type_combinations():
         print(f"  ✓ 지정가 + price 누락 거부: {str(e)[:60]}")
 
 
+def test_from_config_controls_dry_run():
+    print("\n[테스트 15] Config 거래 모드에 따른 dry-run 자동 설정")
+    print("-" * 60)
+    
+    dev_client = BithumbClient.from_config(make_config(TradingMode.DEVELOPMENT))
+    paper_client = BithumbClient.from_config(make_config(TradingMode.PAPER))
+    live_client = BithumbClient.from_config(make_config(TradingMode.LIVE))
+    
+    assert dev_client.dry_run is True
+    assert dev_client.allow_live_orders is False
+    assert paper_client.dry_run is True
+    assert paper_client.allow_live_orders is False
+    assert live_client.dry_run is False
+    assert live_client.allow_live_orders is True
+    
+    print("  ✓ DEVELOPMENT: dry-run + 실주문 차단")
+    print("  ✓ PAPER: dry-run + 실주문 차단")
+    print("  ✓ LIVE: dry-run 해제 + 실주문 허용")
+
+
+def test_live_order_requires_explicit_enable():
+    print("\n[테스트 16] 실주문 이중 안전장치")
+    print("-" * 60)
+    
+    client = BithumbClient(TEST_API_KEY, TEST_SECRET_KEY, dry_run=False)
+    
+    with patch.object(client._session, 'request') as mock_req:
+        try:
+            client.market_buy('KRW-BTC', krw_amount=Decimal('10000'))
+            raise AssertionError("allow_live_orders 없이 실주문이 통과됨!")
+        except BithumbError as e:
+            assert "실주문 차단" in str(e)
+    
+    assert mock_req.call_count == 0, "차단된 주문이 네트워크로 전송됨!"
+    
+    print("  ✓ dry_run=False여도 allow_live_orders 없으면 차단")
+    print("  ✓ 차단된 주문은 네트워크 호출 0번")
+
+
 # ============================================================
 # 메인 실행
 # ============================================================
@@ -543,6 +603,8 @@ def main():
         test_no_retry_on_permanent_error,
         test_secret_not_exposed,
         test_invalid_ord_type_combinations,
+        test_from_config_controls_dry_run,
+        test_live_order_requires_explicit_enable,
     ]
     
     passed = 0

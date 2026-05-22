@@ -131,6 +131,7 @@ class BacktestEngine:
         trades: List[Trade] = []
         current_trade: Optional[Trade] = None
         pending_signal: Optional[TradeDecision] = None  # 다음 봉 체결 대기
+        final_liquidation = None
         
         # 메인 루프
         for i in range(warmup, len(ohlcv)):
@@ -190,15 +191,30 @@ class BacktestEngine:
         if position > 0 and current_trade is not None:
             final_price = ohlcv.iloc[-1]['close']
             final_time = ohlcv.index[-1]
+            cost_factor = self.config.commission_rate + self.config.slippage_rate
+            effective_price = final_price * (1 - cost_factor)
             self._close_position(
-                current_trade, final_price, final_time, 
+                current_trade, effective_price, final_time, 
                 reason="백테스트 종료 강제청산"
             )
-            cash += position * final_price * (1 - self.config.commission_rate - self.config.slippage_rate)
+            current_trade.commission += position * final_price * cost_factor
+            cash += position * effective_price
             position = 0
+            final_liquidation = {
+                'date': final_time,
+                'equity': cash,
+                'cash': cash,
+                'position_value': 0.0,
+            }
         
         # 결과 정리
         equity_df = pd.DataFrame(equity_history).set_index('date')
+        if final_liquidation is not None:
+            equity_df.loc[final_liquidation['date'], ['equity', 'cash', 'position_value']] = [
+                final_liquidation['equity'],
+                final_liquidation['cash'],
+                final_liquidation['position_value'],
+            ]
         equity_curve = equity_df['equity']
         daily_returns = equity_curve.pct_change().dropna()
         

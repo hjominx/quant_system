@@ -105,7 +105,8 @@ class BithumbClient:
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
-        dry_run: bool = False,
+        dry_run: bool = True,
+        allow_live_orders: bool = False,
     ):
         """
         Args:
@@ -115,11 +116,13 @@ class BithumbClient:
             timeout: 단일 요청 타임아웃 (초)
             max_retries: 재시도 가능 에러 시 최대 재시도 횟수
             dry_run: True면 실제 주문을 보내지 않고 로그만 남김 (개발용)
+            allow_live_orders: dry_run=False 주문을 허용하는 두 번째 안전장치
         """
         self.base_url = base_url.rstrip('/')
         self.timeout = timeout
         self.max_retries = max_retries
         self.dry_run = dry_run
+        self.allow_live_orders = allow_live_orders
         
         # JWT 인증 헬퍼
         self._auth = JWTAuthenticator(api_key, secret_key)
@@ -134,13 +137,25 @@ class BithumbClient:
         logger.info(
             f"BithumbClient 초기화: base_url={self.base_url}, "
             f"timeout={self.timeout}s, max_retries={self.max_retries}, "
-            f"dry_run={self.dry_run}"
+            f"dry_run={self.dry_run}, allow_live_orders={self.allow_live_orders}"
         )
     
     def __repr__(self) -> str:
         return (
             f"<BithumbClient base_url={self.base_url} "
-            f"dry_run={self.dry_run} auth={self._auth!r}>"
+            f"dry_run={self.dry_run} allow_live_orders={self.allow_live_orders} "
+            f"auth={self._auth!r}>"
+        )
+
+    @classmethod
+    def from_config(cls, config, **kwargs) -> 'BithumbClient':
+        """Config의 거래 모드에 맞춰 안전하게 클라이언트를 생성"""
+        kwargs.setdefault('dry_run', config.should_dry_run_orders)
+        kwargs.setdefault('allow_live_orders', config.is_live_trading)
+        return cls(
+            config.bithumb_api_key,
+            config.bithumb_secret_key,
+            **kwargs,
         )
     
     def close(self) -> None:
@@ -557,6 +572,11 @@ class BithumbClient:
                 trades_count=0,
                 created_at=None,
                 raw_data={'dry_run': True, **params},
+            )
+        if not self.allow_live_orders:
+            raise BithumbError(
+                "실주문 차단: dry_run=False 주문은 allow_live_orders=True가 필요합니다. "
+                "Config 기반 생성자는 TRADING_MODE=LIVE일 때만 이를 허용합니다."
             )
         
         # 거래 로그 (별도 로거에 영구 기록)
