@@ -4,6 +4,7 @@ ETH/Cash micro live runner safety tests.
 The tests focus on pure safety gates and do not call Bithumb.
 """
 from decimal import Decimal
+from datetime import datetime, timedelta
 import sys
 from pathlib import Path
 
@@ -11,10 +12,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from execution.models import Account, Balances
 from scripts.run_eth_cash_micro_live import (
+    PilotState,
+    assert_order_quota,
     assert_spread_ok,
     build_pilot_plan,
     calculate_buy_amount,
     calculate_sell_volume,
+    record_order,
+    strategy_params_for_profile,
     validate_live_permission,
 )
 from strategies.base import Signal, TradeDecision
@@ -173,6 +178,65 @@ def test_spread_gate_blocks_wide_spread():
     print("  ✓ 과도한 스프레드 차단")
 
 
+def test_intraday_profile_uses_4h_volatility_scaling():
+    print("\n[테스트 6] 4시간봉 프로필")
+    print("-" * 60)
+
+    params = strategy_params_for_profile("intraday4h")
+
+    assert params["periods_per_year"] == 365 * 6
+    assert params["slow_window"] < 200
+    assert params["trailing_stop"] < 0.20
+
+    print("  ✓ 4시간봉 연환산/윈도우/트레일링 설정")
+
+
+def test_order_quota_blocks_cooldown_and_daily_limit():
+    print("\n[테스트 7] 주문 쿨다운/일일 한도")
+    print("-" * 60)
+
+    now = datetime(2026, 5, 22, 9, 0, 0)
+    fresh = PilotState(date=now.date().isoformat())
+    assert_order_quota(
+        state=fresh,
+        now=now,
+        max_orders_per_day=4,
+        cooldown_minutes=120,
+    )
+
+    after_order = record_order(fresh, now)
+    assert after_order.orders_today == 1
+
+    try:
+        assert_order_quota(
+            state=after_order,
+            now=now + timedelta(minutes=30),
+            max_orders_per_day=4,
+            cooldown_minutes=120,
+        )
+        raise AssertionError("쿨다운 중 주문이 허용됨")
+    except RuntimeError:
+        pass
+
+    maxed = PilotState(
+        date=now.date().isoformat(),
+        orders_today=4,
+        last_order_at=(now - timedelta(hours=5)).isoformat(),
+    )
+    try:
+        assert_order_quota(
+            state=maxed,
+            now=now,
+            max_orders_per_day=4,
+            cooldown_minutes=120,
+        )
+        raise AssertionError("일일 한도 초과 주문이 허용됨")
+    except RuntimeError:
+        pass
+
+    print("  ✓ 쿨다운과 일일 주문 한도 적용")
+
+
 def main():
     print("=" * 60)
     print("ETH/Cash Micro Live 안전 테스트")
@@ -184,6 +248,8 @@ def main():
         test_sell_volume_requires_minimum_value,
         test_plan_builder_never_exceeds_caps,
         test_spread_gate_blocks_wide_spread,
+        test_intraday_profile_uses_4h_volatility_scaling,
+        test_order_quota_blocks_cooldown_and_daily_limit,
     ]
 
     passed = 0

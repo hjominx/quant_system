@@ -14,7 +14,7 @@
 ### 🧪 Phase 3e: ETH/Cash Regime Switch 최근 레짐 연구 후보
 ### 🧪 Phase 3f: ETH/Cash Micro Live 소액 파일럿 도구
 
-**검증 통과: 74개 시나리오 (9 + 9 + 16 + 5 + 11 + 6 + 5 + 4 + 4 + 5)**
+**검증 통과: 76개 시나리오 (9 + 9 + 16 + 5 + 11 + 6 + 5 + 4 + 4 + 7)**
 
 ## 다음 단계
 - [ ] 다종목 포트폴리오 QPE 검증
@@ -56,8 +56,8 @@ python scripts/walk_forward_qpe.py
 python scripts/walk_forward_qpe_trend_overlay.py
 python scripts/walk_forward_eth_cash_regime.py
 
-# 7. ETH/Cash 소액 파일럿 1회 실행 (기본은 실제 주문 없는 dry-run)
-python scripts/run_eth_cash_micro_live.py --max-order-krw 10000 --max-position-krw 30000
+# 7. ETH/Cash 소액 파일럿 반복 실행 (기본은 실제 주문 없는 dry-run)
+python scripts/run_eth_cash_micro_live.py --loop --max-order-krw 10000 --max-position-krw 30000
 ```
 
 ## 디렉토리 구조
@@ -74,7 +74,7 @@ quant_system/
 ├── data/               # 캐시, 수집기
 │   └── cache/          # OHLCV CSV 캐시
 ├── scripts/            # 실행 스크립트
-├── tests/              # 74개 검증 시나리오
+├── tests/              # 76개 검증 시나리오
 ├── configs/, results/, logs/
 ```
 
@@ -121,9 +121,10 @@ ETH/Cash Regime은 2024년 말 이후 ETH 단순보유가 크게 흔들린 구�
 
 ## Micro Live 파일럿
 
-`scripts/run_eth_cash_micro_live.py`는 ETH/Cash Regime을 소액으로 1회 실행하는 파일럿 도구입니다.
+`scripts/run_eth_cash_micro_live.py`는 ETH/Cash Regime을 소액으로 반복 실행하는 파일럿 도구입니다.
 
 - 기본값은 dry-run이며 실제 주문을 보내지 않음
 - 실제 주문은 `.env`의 `TRADING_MODE=LIVE`, `--live`, `--yes-i-understand-risk`가 모두 있을 때만 가능
 - 최대 주문금액, 최대 ETH 평가금액, 최소 주문금액, 미체결 주문, 호가 스프레드 게이트를 강제
+- 기본 프로필은 4시간봉 `intraday4h`이며 `--loop`, `--interval-minutes`, `--cooldown-minutes`, `--max-orders-per-day`로 반복 주기를 제어
 - 시장가 매수는 KRW 금액만, 시장가 매도는 ETH 수량만 전송하는 빗썸 V2 비대칭 규칙 준수
