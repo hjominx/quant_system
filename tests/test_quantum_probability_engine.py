@@ -197,7 +197,7 @@ def test_qpe_walk_forward_runs():
             test_years=1,
             step_years=1,
             mode='expanding',
-            objective='calmar_ratio',
+            objective='qpe_composite_score',
             min_train_bars=300,
             min_test_bars=120,
         ),

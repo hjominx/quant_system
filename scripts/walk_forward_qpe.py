@@ -50,7 +50,7 @@ def run_single_walk_forward(market: str, timeframe: str = '1d'):
         test_years=1,
         step_years=1,
         mode='expanding',
-        objective='calmar_ratio',
+        objective='qpe_composite_score',
         min_train_bars=300,
         min_test_bars=180,
         allow_partial_final_window=True,
@@ -73,9 +73,9 @@ def run_single_walk_forward(market: str, timeframe: str = '1d'):
     print("\n[윈도우별 OOS 결과]")
     print(
         f"{'ID':>2} {'Train':<23} {'Test':<23} "
-        f"{'Best Params':<58} {'OOS Ret':>9} {'MDD':>8} {'Sharpe':>7} {'Calmar':>7} {'Trades':>6}"
+        f"{'Best Params':<58} {'Score':>7} {'OOS Ret':>9} {'MDD':>8} {'Sharpe':>7} {'Calmar':>7} {'Trades':>6}"
     )
-    print("─" * 150)
+    print("─" * 160)
 
     for _, row in result.windows_dataframe().iterrows():
         params = row['best_params']
@@ -90,6 +90,7 @@ def run_single_walk_forward(market: str, timeframe: str = '1d'):
             f"{int(row['window_id']):>2} "
             f"{train_range:<23} {test_range:<23} "
             f"{param_text:<58} "
+            f"{row['objective_value']:>7.3f} "
             f"{row['oos_return']*100:>+8.2f}% "
             f"{row['oos_mdd']*100:>+7.2f}% "
             f"{row['oos_sharpe']:>7.2f} "

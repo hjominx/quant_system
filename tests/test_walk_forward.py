@@ -1,12 +1,13 @@
 """
 Walk-Forward 검증 엔진 테스트
 
-검증 시나리오 5가지:
+검증 시나리오 6가지:
 1. Expanding 방식 Walk-Forward 실행
 2. Rolling 방식에서 학습 구간 시작점이 이동하는지 확인
 3. OOS 자산곡선이 윈도우별로 이어 붙는지 확인
 4. 잘못된 파라미터 후보를 스킵하는지 확인
-5. 빈 파라미터 그리드를 거부하는지 확인
+5. 복합 objective가 최적화 로그에 기록되는지 확인
+6. 빈 파라미터 그리드를 거부하는지 확인
 """
 import sys
 import os
@@ -155,8 +156,31 @@ def test_invalid_parameters_are_skipped():
     print(f"  ✓ 유효 후보로 검증 계속 진행")
 
 
+def test_composite_objective_supported():
+    print("\n[테스트 5] 복합 objective 지원")
+    print("-" * 60)
+
+    engine = make_engine('expanding')
+    engine.config.objective = 'qpe_composite_score'
+    result = engine.run(
+        make_test_ohlcv(n_days=760),
+        ticker='TEST',
+        parameter_grid=PARAM_GRID,
+    )
+
+    assert len(result.windows) >= 1
+    assert 'objective_sharpe_component' in result.optimization_log.columns
+    assert 'objective_turnover_penalty' in result.optimization_log.columns
+    assert result.optimization_log['objective_value'].notnull().any()
+
+    best = result.windows_dataframe().iloc[0]
+    print(f"  ✓ objective: {engine.config.objective}")
+    print(f"  ✓ 선택 점수: {best['objective_value']:.3f}")
+    print(f"  ✓ 세부 항목 기록됨")
+
+
 def test_empty_parameter_grid_rejected():
-    print("\n[테스트 5] 빈 파라미터 그리드 거부")
+    print("\n[테스트 6] 빈 파라미터 그리드 거부")
     print("-" * 60)
 
     try:
@@ -182,6 +206,7 @@ def main():
         test_rolling_windows_advance_train_start,
         test_oos_equity_is_stitched,
         test_invalid_parameters_are_skipped,
+        test_composite_objective_supported,
         test_empty_parameter_grid_rejected,
     ]
 

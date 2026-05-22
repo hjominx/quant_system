@@ -8,9 +8,10 @@
 ### ✅ Phase 2c: 실제 빗썸 연결 검증
 ### ✅ Phase 2d: 데이터 수집 모듈
 ### ✅ Phase 3a: Walk-Forward 검증 엔진
-### ✅ Phase 3b: QPE 시장상태 적응형 복합 알파 엔진 ← 최신
+### ✅ Phase 3b: QPE 시장상태 적응형 복합 알파 엔진
+### ✅ Phase 3c: Sharpe/Sortino/Calmar 복합 Objective ← 최신
 
-**검증 통과: 60개 시나리오 (9 + 9 + 16 + 5 + 11 + 5 + 5)**
+**검증 통과: 61개 시나리오 (9 + 9 + 16 + 5 + 11 + 6 + 5)**
 
 ## 다음 단계
 - [ ] 다종목 포트폴리오 QPE 검증
@@ -56,13 +57,13 @@ quant_system/
 ├── regime/             # 시장상태 확률 엔진
 ├── risk/               # 확률 기반 포지션 사이징
 ├── strategies/         # 전략 인터페이스, SMA, QPE
-├── backtest/           # 백테스트 엔진, 성과 지표, Walk-Forward
+├── backtest/           # 백테스트 엔진, 성과 지표, 복합 Objective, Walk-Forward
 ├── execution/          # 빗썸 클라이언트, 데이터 모델
 ├── utils/              # 설정, 로거, JWT 인증
 ├── data/               # 캐시, 수집기
 │   └── cache/          # OHLCV CSV 캐시
 ├── scripts/            # 실행 스크립트
-├── tests/              # 60개 검증 시나리오
+├── tests/              # 61개 검증 시나리오
 ├── configs/, results/, logs/
 ```
 
@@ -76,6 +77,7 @@ quant_system/
 - ✅ Look-ahead bias 수학적 방지
 - ✅ 거래비용 강제 반영
 - ✅ Walk-Forward 검증
+- ✅ 복합 Objective: Sharpe + Sortino + Calmar + 수익률 + MDD + Turnover
 - ✅ 증분 데이터 업데이트
 - ✅ QPE: 시장상태 확률 + 복합 알파 + 확률 기반 포지션 사이징
 
@@ -87,3 +89,4 @@ QPE(Quantum Probability Engine)는 실제 양자컴퓨터가 아니라, 시장�
 - 복합 알파: 추세, 모멘텀, 평균회귀, 돌파, 유동성/거래량 특징을 결합
 - 포지션: edge, crash risk, uncertainty, volatility에 따라 연속적으로 축소/확대
 - 검증: walk-forward 방식으로 out-of-sample 구간만 모아 평가
+- 최적화: `qpe_composite_score`로 Sharpe, Sortino, Calmar, 누적수익, MDD, 거래 빈도를 함께 평가

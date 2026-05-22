@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backtest.engine import BacktestConfig, BacktestEngine, BacktestResult
 from backtest.metrics import PerformanceMetrics, calculate_metrics
+from backtest.objectives import ObjectiveResult, calculate_objective
 from strategies.base import BaseStrategy
 
 
@@ -293,20 +294,25 @@ class WalkForwardEngine:
             try:
                 strategy = self.strategy_factory(dict(params))
                 result = BacktestEngine(self.backtest_config).run(strategy, train_df, ticker)
-                score = self._objective_value(result.metrics)
+                objective_result = self._objective_value(result.metrics)
+                score = objective_result.score
+                objective_details = objective_result.details
                 status = "ok"
             except Exception as e:
                 result = None
                 score = np.nan
+                objective_details = {}
                 status = f"error: {type(e).__name__}: {e}"
 
-            rows.append({
+            row = {
                 "window_id": window_id,
                 "params": dict(params),
                 "objective": self.config.objective,
                 "objective_value": score,
                 "status": status,
-            })
+            }
+            row.update(objective_details)
+            rows.append(row)
 
             if result is not None and np.isfinite(score) and score > best_score:
                 best_score = score
@@ -339,11 +345,8 @@ class WalkForwardEngine:
         oos_input = pd.concat([train_df.tail(warmup), test_df])
         return BacktestEngine(self.backtest_config).run(strategy, oos_input, ticker)
 
-    def _objective_value(self, metrics: PerformanceMetrics) -> float:
-        if not hasattr(metrics, self.config.objective):
-            raise ValueError(f"지원하지 않는 objective: {self.config.objective}")
-        value = getattr(metrics, self.config.objective)
-        return float(value)
+    def _objective_value(self, metrics: PerformanceMetrics) -> ObjectiveResult:
+        return calculate_objective(metrics, self.config.objective)
 
     def _stitch_oos_equity(self, windows: List[WalkForwardWindowResult]) -> pd.Series:
         curves = []
