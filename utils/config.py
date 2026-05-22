@@ -187,6 +187,11 @@ class Config:
     def is_live_trading(self) -> bool:
         """실거래 모드 여부 (안전장치)"""
         return self.trading_mode.is_live
+
+    @property
+    def should_dry_run_orders(self) -> bool:
+        """주문을 실제로 보내면 안 되는 모드인지 여부"""
+        return not self.is_live_trading
     
     def mask_secret(self, value: str) -> str:
         """로그·디스플레이용 시크릿 마스킹

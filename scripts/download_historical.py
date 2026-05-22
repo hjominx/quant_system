@@ -83,7 +83,7 @@ def main():
     print(f"대상 종목: {len(ALL_TARGETS)}개")
     
     # 클라이언트 초기화
-    client = BithumbClient(cfg.bithumb_api_key, cfg.bithumb_secret_key)
+    client = BithumbClient.from_config(cfg)
     available_markets = {m.market for m in client.get_krw_markets()}
     
     # 헬스체크
