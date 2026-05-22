@@ -57,6 +57,11 @@ ALT_TARGETS_1D = [
 
 ALL_TARGETS = CORE_TARGETS + ALT_TARGETS_4H + ALT_TARGETS_1D
 
+# 빗썸에서 상장 폐지되거나 티커가 변경된 종목 매핑
+MARKET_ALIASES = {
+    'KRW-MATIC': 'KRW-POL',
+}
+
 
 def main():
     # 로깅 설정 (INFO 레벨)
@@ -79,6 +84,7 @@ def main():
     
     # 클라이언트 초기화
     client = BithumbClient(cfg.bithumb_api_key, cfg.bithumb_secret_key)
+    available_markets = {m.market for m in client.get_krw_markets()}
     
     # 헬스체크
     print("\n빗썸 연결 확인 중...")
@@ -100,10 +106,17 @@ def main():
     
     for idx, (market, timeframe) in enumerate(ALL_TARGETS, 1):
         print(f"\n[{idx}/{len(ALL_TARGETS)}] {market} {timeframe}")
+        resolved_market = MARKET_ALIASES.get(market, market)
+        if resolved_market != market:
+            print(f"  ⚠️  {market}은(는) 현재 {resolved_market}으로 매핑됩니다.")
+        if resolved_market not in available_markets:
+            print(f"  ✗ 건너뜀: {resolved_market}은(는) 현재 지원되지 않는 시장입니다.")
+            results['failed'].append(f"{market} {timeframe} - unsupported market")
+            continue
         
         try:
             df = collector.collect_historical(
-                market=market,
+                market=resolved_market,
                 timeframe=timeframe,
                 years=5.0,
                 use_cache=True,

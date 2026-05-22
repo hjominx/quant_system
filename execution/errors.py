@@ -224,7 +224,8 @@ def _extract_error_name(response_data: Optional[Dict]) -> Optional[str]:
         return None
     
     if isinstance(response_data.get('error'), dict):
-        return response_data['error'].get('name')
+        name = response_data['error'].get('name')
+        return str(name) if name is not None else None
     
     if 'status' in response_data and response_data['status'] != '0000':
         return f"status_{response_data['status']}"

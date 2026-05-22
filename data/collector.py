@@ -400,7 +400,8 @@ class OHLCVCollector:
         """빗썸 API에 보낼 datetime 형식 (ISO 8601)"""
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return dt.strftime('%Y-%m-%dT%H:%M:%S%z')
+        # 빗썸 캔들 API의 to 파라미터는 timezone 없이 'YYYY-MM-DD HH:MM:SS' 형식을 사용합니다.
+        return dt.strftime('%Y-%m-%d %H:%M:%S')
     
     def collect_multiple(
         self,

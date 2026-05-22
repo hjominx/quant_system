@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.auth import JWTAuthenticator
 from execution.errors import (
     BithumbError,
+    InvalidRequestError,
     NetworkError,
     RetryableError,
     classify_http_error,
@@ -276,6 +277,16 @@ class BithumbClient:
             logger.error(f"{method} {endpoint} 실패: {error}")
             raise error
         
+        # 일부 빗썸 API는 HTTP 200이더라도 body에 error 객체를 담아 반환합니다.
+        if isinstance(data, dict) and 'error' in data:
+            error = classify_http_error(
+                status_code=response.status_code,
+                response_data=data,
+                response_text=response.text,
+            )
+            logger.error(f"{method} {endpoint} 실패: {error}")
+            raise error
+
         logger.debug(f"{method} {endpoint} 성공: {response.status_code}")
         return data
     
@@ -414,6 +425,12 @@ class BithumbClient:
             params['to'] = to
         
         data = self._request('GET', endpoint, params=params, requires_auth=False)
+        if not isinstance(data, list):
+            raise InvalidRequestError(
+                f"캔들 응답 형식 오류: 예상된 list가 아닙니다.",
+                response_data=data,
+                status_code=200,
+            )
         return [Candle.from_dict(d) for d in data]
     
     # ========================================================
