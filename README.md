@@ -12,8 +12,9 @@
 ### ✅ Phase 3c: Sharpe/Sortino/Calmar 복합 Objective ← 최신
 ### 🧪 Phase 3d: QPE Trend Overlay 공격형 연구 후보
 ### 🧪 Phase 3e: ETH/Cash Regime Switch 최근 레짐 연구 후보
+### 🧪 Phase 3f: ETH/Cash Micro Live 소액 파일럿 도구
 
-**검증 통과: 69개 시나리오 (9 + 9 + 16 + 5 + 11 + 6 + 5 + 4 + 4)**
+**검증 통과: 74개 시나리오 (9 + 9 + 16 + 5 + 11 + 6 + 5 + 4 + 4 + 5)**
 
 ## 다음 단계
 - [ ] 다종목 포트폴리오 QPE 검증
@@ -41,6 +42,7 @@ python tests/test_walk_forward.py
 python tests/test_quantum_probability_engine.py
 python tests/test_qpe_trend_overlay.py
 python tests/test_eth_cash_regime.py
+python tests/test_eth_cash_micro_live.py
 
 # 4. 실데이터 수집 검증 (단일 종목)
 python scripts/test_live_collection.py
@@ -53,6 +55,9 @@ python scripts/walk_forward_sma.py
 python scripts/walk_forward_qpe.py
 python scripts/walk_forward_qpe_trend_overlay.py
 python scripts/walk_forward_eth_cash_regime.py
+
+# 7. ETH/Cash 소액 파일럿 1회 실행 (기본은 실제 주문 없는 dry-run)
+python scripts/run_eth_cash_micro_live.py --max-order-krw 10000 --max-position-krw 30000
 ```
 
 ## 디렉토리 구조
@@ -69,7 +74,7 @@ quant_system/
 ├── data/               # 캐시, 수집기
 │   └── cache/          # OHLCV CSV 캐시
 ├── scripts/            # 실행 스크립트
-├── tests/              # 69개 검증 시나리오
+├── tests/              # 74개 검증 시나리오
 ├── configs/, results/, logs/
 ```
 
@@ -113,3 +118,12 @@ ETH/Cash Regime은 2024년 말 이후 ETH 단순보유가 크게 흔들린 구�
 - 위험관리: 60일 이탈, 모멘텀 둔화, RSI 약화, 단기 급락, 트레일링 스탑에서 현금 전환
 - 최근 구간: 2024년 말 이후 고정 파라미터 기준 QPE Trend Overlay보다 높은 Sharpe 후보 확인
 - 주의: 전체 5년 Walk-Forward 기준 최종 실전 전략은 아니며, 최근 레짐 필터/리스크 게이트 후보로 분류
+
+## Micro Live 파일럿
+
+`scripts/run_eth_cash_micro_live.py`는 ETH/Cash Regime을 소액으로 1회 실행하는 파일럿 도구입니다.
+
+- 기본값은 dry-run이며 실제 주문을 보내지 않음
+- 실제 주문은 `.env`의 `TRADING_MODE=LIVE`, `--live`, `--yes-i-understand-risk`가 모두 있을 때만 가능
+- 최대 주문금액, 최대 ETH 평가금액, 최소 주문금액, 미체결 주문, 호가 스프레드 게이트를 강제
+- 시장가 매수는 KRW 금액만, 시장가 매도는 ETH 수량만 전송하는 빗썸 V2 비대칭 규칙 준수
