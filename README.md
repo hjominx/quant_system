@@ -13,8 +13,9 @@
 ### 🧪 Phase 3d: QPE Trend Overlay 공격형 연구 후보
 ### 🧪 Phase 3e: ETH/Cash Regime Switch 최근 레짐 연구 후보
 ### 🧪 Phase 3f: ETH/Cash Micro Live 소액 파일럿 도구
+### 🧪 Phase 3g: LIVE 전 계좌 위험관리 게이트
 
-**검증 통과: 76개 시나리오 (9 + 9 + 16 + 5 + 11 + 6 + 5 + 4 + 4 + 7)**
+**검증 통과: 83개 시나리오 (9 + 9 + 16 + 5 + 11 + 6 + 5 + 4 + 4 + 14)**
 
 ## 다음 단계
 - [ ] 다종목 포트폴리오 QPE 검증
@@ -66,7 +67,7 @@ python scripts/run_eth_cash_micro_live.py --loop --max-order-krw 10000 --max-pos
 quant_system/
 ├── features/           # 시장 특징 추출기
 ├── regime/             # 시장상태 확률 엔진
-├── risk/               # 확률 기반 포지션 사이징
+├── risk/               # 확률 기반 포지션 사이징, LIVE 위험 게이트
 ├── strategies/         # 전략 인터페이스, SMA, QPE
 ├── backtest/           # 백테스트 엔진, 성과 지표, 복합 Objective, Walk-Forward
 ├── execution/          # 빗썸 클라이언트, 데이터 모델
@@ -74,7 +75,7 @@ quant_system/
 ├── data/               # 캐시, 수집기
 │   └── cache/          # OHLCV CSV 캐시
 ├── scripts/            # 실행 스크립트
-├── tests/              # 76개 검증 시나리오
+├── tests/              # 83개 검증 시나리오
 ├── configs/, results/, logs/
 ```
 
@@ -127,4 +128,5 @@ ETH/Cash Regime은 2024년 말 이후 ETH 단순보유가 크게 흔들린 구�
 - 실제 주문은 `.env`의 `TRADING_MODE=LIVE`, `--live`, `--yes-i-understand-risk`가 모두 있을 때만 가능
 - 최대 주문금액, 최대 ETH 평가금액, 최소 주문금액, 미체결 주문, 호가 스프레드 게이트를 강제
 - 기본 프로필은 4시간봉 `intraday4h`이며 `--loop`, `--interval-minutes`, `--cooldown-minutes`, `--max-orders-per-day`로 반복 주기를 제어
+- 계좌 위험 게이트가 일일 손실, 주간 손실, MDD, 킬스위치 파일(`logs/KILL_SWITCH_ACTIVE`)을 주문 직전에 강제
 - 시장가 매수는 KRW 금액만, 시장가 매도는 ETH 수량만 전송하는 빗썸 V2 비대칭 규칙 준수

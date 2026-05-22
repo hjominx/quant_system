@@ -4,7 +4,7 @@ ETH/Cash micro live runner.
 This script runs guarded decision cycles for KRW-ETH:
 1. Pull recent 4h or daily candles from Bithumb.
 2. Evaluate ETHCashRegimeStrategy.
-3. Check balances, open orders, spread, and micro-live caps.
+3. Check balances, open orders, spread, account risk, and micro-live caps.
 4. Place at most one market order.
 
 Default mode is dry-run. Real orders require all three:
@@ -36,6 +36,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from execution.bithumb_client import BithumbClient
 from execution.models import Balances, Candle, Order
+from risk.live_guard import (
+    RiskLimits,
+    assert_risk_allows_action,
+    evaluate_risk,
+    format_pct,
+    load_risk_state,
+    save_risk_state,
+)
 from strategies.base import Signal, StrategyContext, TradeDecision
 from strategies.eth_cash_regime import ETHCashRegimeStrategy
 from utils.config import Config, get_config
@@ -286,6 +294,18 @@ def build_strategy_context(
     )
 
 
+def calculate_portfolio_equity(
+    *,
+    market: str,
+    balances: Balances,
+    trade_price: Decimal,
+) -> Decimal:
+    """Return KRW cash plus live mark-to-market value for the traded coin."""
+    base = market_base_currency(market)
+    coin_balance = balances.get_total(base)
+    return balances.krw_balance + (coin_balance * trade_price)
+
+
 def build_pilot_plan(
     *,
     decision: TradeDecision,
@@ -392,6 +412,16 @@ def parse_args() -> argparse.Namespace:
         default="logs/eth_cash_micro_live_state.json",
         help="Persistent order counter/cooldown file.",
     )
+    parser.add_argument(
+        "--risk-state-file",
+        default="logs/eth_cash_micro_live_risk_state.json",
+        help="Persistent account risk baseline file.",
+    )
+    parser.add_argument(
+        "--kill-switch-file",
+        default="logs/KILL_SWITCH_ACTIVE",
+        help="If this file exists, all BUY/SELL orders are blocked.",
+    )
     parser.add_argument("--live", action="store_true", help="Send real orders. Requires TRADING_MODE=LIVE.")
     parser.add_argument("--yes-i-understand-risk", action="store_true")
     parser.add_argument("--no-file-log", action="store_true", help="Disable file logging for local permission-limited runs.")
@@ -432,6 +462,7 @@ def print_banner(args: argparse.Namespace, dry_run: bool) -> None:
         f"loop={args.loop} interval={args.interval_minutes}m "
         f"cooldown={args.cooldown_minutes}m max_orders/day={args.max_orders_per_day}"
     )
+    print(f"risk_state={args.risk_state_file} kill_switch={args.kill_switch_file}")
 
 
 def run_cycle(
@@ -440,6 +471,9 @@ def run_cycle(
     args: argparse.Namespace,
     dry_run: bool,
     state_path: Path,
+    risk_state_path: Path,
+    kill_switch_path: Path,
+    risk_limits: RiskLimits,
 ) -> Optional[Order]:
     """Run one guarded decision cycle and optionally place one order."""
     now = datetime.now()
@@ -462,6 +496,19 @@ def run_cycle(
     balances = client.get_balances()
     orderbook = client.get_orderbook(args.market)
     assert_spread_ok(orderbook.spread_pct, args.max_spread_pct)
+
+    portfolio_equity = calculate_portfolio_equity(
+        market=args.market,
+        balances=balances,
+        trade_price=ticker.trade_price,
+    )
+    risk_state = load_risk_state(risk_state_path, now, portfolio_equity)
+    risk_report = evaluate_risk(
+        state=risk_state,
+        equity=portfolio_equity,
+        limits=risk_limits,
+        kill_switch_file_active=kill_switch_path.exists(),
+    )
 
     ctx = build_strategy_context(
         market=args.market,
@@ -493,6 +540,25 @@ def run_cycle(
     print(f"스프레드: {orderbook.spread_pct * Decimal('100'):.4f}%")
     print(f"오늘 주문수: {state.orders_today}/{args.max_orders_per_day}")
 
+    print("\n[위험 게이트]")
+    print(f"계좌 평가액: {quantize_krw(risk_report.equity):,} KRW")
+    print(
+        f"일일 손실: {format_pct(risk_report.daily_loss)} "
+        f"/ 한도 {format_pct(risk_limits.daily_loss_limit)}"
+    )
+    print(
+        f"주간 손실: {format_pct(risk_report.weekly_loss)} "
+        f"/ 한도 {format_pct(risk_limits.weekly_loss_limit)}"
+    )
+    print(
+        f"MDD: {format_pct(risk_report.drawdown)} "
+        f"/ 한도 {format_pct(risk_limits.max_drawdown_limit)}"
+    )
+    if risk_report.kill_switch_active:
+        print("킬스위치: ACTIVE")
+    else:
+        print("킬스위치: inactive")
+
     print("\n[전략 판단]")
     print(f"signal={decision.signal.name} target_weight={decision.target_weight:.3f}")
     print(decision.reason)
@@ -500,13 +566,18 @@ def run_cycle(
     print("\n[파일럿 주문 계획]")
     print(plan)
 
-    if plan.action in ("BUY", "SELL") and not dry_run:
-        assert_order_quota(
-            state=state,
-            now=now,
-            max_orders_per_day=args.max_orders_per_day,
-            cooldown_minutes=args.cooldown_minutes,
-        )
+    if not dry_run:
+        save_risk_state(risk_state_path, risk_report.state)
+
+    if plan.action in ("BUY", "SELL"):
+        assert_risk_allows_action(plan.action, risk_report)
+        if not dry_run:
+            assert_order_quota(
+                state=state,
+                now=now,
+                max_orders_per_day=args.max_orders_per_day,
+                cooldown_minutes=args.cooldown_minutes,
+            )
 
     order = execute_plan(client, args.market, plan)
     if order is None:
@@ -530,6 +601,9 @@ def main() -> None:
 
     dry_run = not args.live
     state_path = Path(args.state_file)
+    risk_state_path = Path(args.risk_state_file)
+    kill_switch_path = Path(args.kill_switch_file)
+    risk_limits = RiskLimits.from_config(cfg)
     client = BithumbClient.from_config(
         cfg,
         dry_run=dry_run,
@@ -545,6 +619,9 @@ def main() -> None:
                     args=args,
                     dry_run=dry_run,
                     state_path=state_path,
+                    risk_state_path=risk_state_path,
+                    kill_switch_path=kill_switch_path,
+                    risk_limits=risk_limits,
                 )
             except Exception as exc:
                 print(f"\n[차단/오류] {type(exc).__name__}: {exc}")

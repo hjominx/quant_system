@@ -7,10 +7,24 @@ from decimal import Decimal
 from datetime import datetime, timedelta
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from execution.models import Account, Balances
+from risk.live_guard import (
+    RiskGateError,
+    RiskLimits,
+    RiskState,
+    RiskStateError,
+    assert_risk_allows_action,
+    create_initial_risk_state,
+    evaluate_risk,
+    iso_week_key,
+    load_risk_state,
+    roll_risk_state,
+    save_risk_state,
+)
 from scripts.run_eth_cash_micro_live import (
     PilotState,
     assert_order_quota,
@@ -237,6 +251,199 @@ def test_order_quota_blocks_cooldown_and_daily_limit():
     print("  ✓ 쿨다운과 일일 주문 한도 적용")
 
 
+def test_risk_state_initializes_and_rolls_periods():
+    print("\n[테스트 8] 위험 상태 기준값 초기화/리셋")
+    print("-" * 60)
+
+    now = datetime(2026, 5, 22, 9, 0, 0)
+    state = create_initial_risk_state(now, Decimal("100000"))
+    assert state.date == "2026-05-22"
+    assert state.iso_week == iso_week_key(now)
+    assert state.day_start_equity == Decimal("100000")
+    assert state.week_start_equity == Decimal("100000")
+    assert state.peak_equity == Decimal("100000")
+
+    old = RiskState(
+        date="2026-05-21",
+        iso_week=iso_week_key(now),
+        day_start_equity=Decimal("120000"),
+        week_start_equity=Decimal("150000"),
+        peak_equity=Decimal("150000"),
+    )
+    rolled = roll_risk_state(old, now, Decimal("100000"))
+    assert rolled.day_start_equity == Decimal("100000")
+    assert rolled.week_start_equity == Decimal("150000")
+    assert rolled.peak_equity == Decimal("150000")
+
+    next_week = datetime(2026, 5, 25, 9, 0, 0)
+    rolled_week = roll_risk_state(rolled, next_week, Decimal("90000"))
+    assert rolled_week.week_start_equity == Decimal("90000")
+
+    print("  ✓ 일/주 기준값과 최고자산 추적 정상")
+
+
+def test_daily_loss_blocks_buy_but_allows_sell():
+    print("\n[테스트 9] 일일 손실 한도")
+    print("-" * 60)
+
+    limits = RiskLimits(
+        daily_loss_limit=Decimal("0.03"),
+        weekly_loss_limit=Decimal("0.07"),
+        max_drawdown_limit=Decimal("0.15"),
+    )
+    state = RiskState(
+        date="2026-05-22",
+        iso_week="2026-W21",
+        day_start_equity=Decimal("100000"),
+        week_start_equity=Decimal("100000"),
+        peak_equity=Decimal("100000"),
+    )
+    report = evaluate_risk(state=state, equity=Decimal("96000"), limits=limits)
+
+    assert report.daily_breached is True
+    try:
+        assert_risk_allows_action("BUY", report)
+        raise AssertionError("일일 손실 초과 후 매수가 허용됨")
+    except RiskGateError:
+        pass
+    assert_risk_allows_action("SELL", report)
+
+    print("  ✓ 일일 손실 초과 시 신규 매수만 차단")
+
+
+def test_weekly_loss_blocks_buy():
+    print("\n[테스트 10] 주간 손실 한도")
+    print("-" * 60)
+
+    limits = RiskLimits(
+        daily_loss_limit=Decimal("0.03"),
+        weekly_loss_limit=Decimal("0.07"),
+        max_drawdown_limit=Decimal("0.15"),
+    )
+    state = RiskState(
+        date="2026-05-22",
+        iso_week="2026-W21",
+        day_start_equity=Decimal("94000"),
+        week_start_equity=Decimal("100000"),
+        peak_equity=Decimal("100000"),
+    )
+    report = evaluate_risk(state=state, equity=Decimal("92000"), limits=limits)
+
+    assert report.weekly_breached is True
+    try:
+        assert_risk_allows_action("BUY", report)
+        raise AssertionError("주간 손실 초과 후 매수가 허용됨")
+    except RiskGateError:
+        pass
+    assert_risk_allows_action("SELL", report)
+
+    print("  ✓ 주간 손실 초과 시 신규 매수 차단")
+
+
+def test_mdd_breach_blocks_buy_and_sell():
+    print("\n[테스트 11] MDD 한도")
+    print("-" * 60)
+
+    limits = RiskLimits(
+        daily_loss_limit=Decimal("0.03"),
+        weekly_loss_limit=Decimal("0.07"),
+        max_drawdown_limit=Decimal("0.15"),
+    )
+    state = RiskState(
+        date="2026-05-22",
+        iso_week="2026-W21",
+        day_start_equity=Decimal("90000"),
+        week_start_equity=Decimal("90000"),
+        peak_equity=Decimal("120000"),
+    )
+    report = evaluate_risk(state=state, equity=Decimal("100000"), limits=limits)
+
+    assert report.drawdown_breached is True
+    for action in ("BUY", "SELL"):
+        try:
+            assert_risk_allows_action(action, report)
+            raise AssertionError(f"MDD 초과 후 {action}이 허용됨")
+        except RiskGateError:
+            pass
+
+    print("  ✓ MDD 초과 시 모든 실주문 차단")
+
+
+def test_kill_switch_blocks_all_orders():
+    print("\n[테스트 12] 킬스위치")
+    print("-" * 60)
+
+    limits = RiskLimits(
+        daily_loss_limit=Decimal("0.03"),
+        weekly_loss_limit=Decimal("0.07"),
+        max_drawdown_limit=Decimal("0.15"),
+    )
+    state = RiskState(
+        date="2026-05-22",
+        iso_week="2026-W21",
+        day_start_equity=Decimal("100000"),
+        week_start_equity=Decimal("100000"),
+        peak_equity=Decimal("100000"),
+    )
+    report = evaluate_risk(
+        state=state,
+        equity=Decimal("100000"),
+        limits=limits,
+        kill_switch_file_active=True,
+    )
+
+    for action in ("BUY", "SELL"):
+        try:
+            assert_risk_allows_action(action, report)
+            raise AssertionError(f"킬스위치 중 {action}이 허용됨")
+        except RiskGateError:
+            pass
+
+    print("  ✓ 킬스위치 활성 시 모든 주문 차단")
+
+
+def test_risk_state_round_trip():
+    print("\n[테스트 13] 위험 상태 저장/로드")
+    print("-" * 60)
+
+    with TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "risk_state.json"
+        now = datetime(2026, 5, 22, 9, 0, 0)
+        state = RiskState(
+            date="2026-05-22",
+            iso_week=iso_week_key(now),
+            day_start_equity=Decimal("100000"),
+            week_start_equity=Decimal("120000"),
+            peak_equity=Decimal("150000"),
+            kill_switch=True,
+        )
+        save_risk_state(path, state)
+        loaded = load_risk_state(path, now, Decimal("110000"))
+
+        assert loaded.day_start_equity == Decimal("100000")
+        assert loaded.week_start_equity == Decimal("120000")
+        assert loaded.peak_equity == Decimal("150000")
+        assert loaded.kill_switch is True
+
+    print("  ✓ Decimal 상태 저장/로드 정상")
+
+
+def test_corrupt_risk_state_fails_closed():
+    print("\n[테스트 14] 위험 상태 손상 시 fail-closed")
+    print("-" * 60)
+
+    with TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "risk_state.json"
+        path.write_text("{not valid json", encoding="utf-8")
+        try:
+            load_risk_state(path, datetime(2026, 5, 22, 9, 0, 0), Decimal("100000"))
+            raise AssertionError("손상된 위험 상태가 통과됨")
+        except RiskStateError:
+            pass
+
+    print("  ✓ 위험 상태 파일 손상 시 주문 전 차단")
+
+
 def main():
     print("=" * 60)
     print("ETH/Cash Micro Live 안전 테스트")
@@ -250,6 +457,13 @@ def main():
         test_spread_gate_blocks_wide_spread,
         test_intraday_profile_uses_4h_volatility_scaling,
         test_order_quota_blocks_cooldown_and_daily_limit,
+        test_risk_state_initializes_and_rolls_periods,
+        test_daily_loss_blocks_buy_but_allows_sell,
+        test_weekly_loss_blocks_buy,
+        test_mdd_breach_blocks_buy_and_sell,
+        test_kill_switch_blocks_all_orders,
+        test_risk_state_round_trip,
+        test_corrupt_risk_state_fails_closed,
     ]
 
     passed = 0
