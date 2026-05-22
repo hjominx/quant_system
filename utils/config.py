@@ -145,6 +145,7 @@ class Config:
     # --- 알림 ---
     telegram_bot_token: Optional[str] = field(default=None, repr=False)
     telegram_chat_id: Optional[str] = None
+    discord_webhook_url: Optional[str] = field(default=None, repr=False)
     
     # --- 로깅 ---
     log_level: str = "INFO"
@@ -225,6 +226,7 @@ API 키:           {self.mask_secret(self.bithumb_api_key)}
 
 [알림]
 텔레그램:         {'설정됨' if self.telegram_bot_token else '미설정'}
+디스코드:         {'설정됨' if self.discord_webhook_url else '미설정'}
 
 [로깅]
 레벨:             {self.log_level}
@@ -284,6 +286,7 @@ def get_config(env_file: Optional[Path] = None, force_reload: bool = False) -> C
         initial_capital=_get_env_float("INITIAL_CAPITAL", default=10_000_000, min_val=10_000),
         telegram_bot_token=_get_env("TELEGRAM_BOT_TOKEN", secret=True),
         telegram_chat_id=_get_env("TELEGRAM_CHAT_ID"),
+        discord_webhook_url=_get_env("DISCORD_WEBHOOK_URL", secret=True),
         log_level=_get_env("LOG_LEVEL", default="INFO"),
     )
     

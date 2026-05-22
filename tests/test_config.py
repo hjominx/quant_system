@@ -28,7 +28,7 @@ def _clean_env():
         'BITHUMB_API_KEY', 'BITHUMB_SECRET_KEY', 'TRADING_MODE',
         'DAILY_LOSS_LIMIT', 'WEEKLY_LOSS_LIMIT', 'MAX_DRAWDOWN_LIMIT',
         'MAX_POSITION_PER_COIN', 'MAX_TOTAL_CRYPTO', 'INITIAL_CAPITAL',
-        'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'LOG_LEVEL',
+        'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'DISCORD_WEBHOOK_URL', 'LOG_LEVEL',
     ]
     for key in keys_to_clean:
         os.environ.pop(key, None)
@@ -219,6 +219,7 @@ def test_secret_not_exposed():
 BITHUMB_API_KEY=test_api_key_1234567890abcdef
 BITHUMB_SECRET_KEY={secret_value}
 TELEGRAM_BOT_TOKEN=ALSO_SECRET_TOKEN_1234567890
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/1234567890/VERY_SECRET_DISCORD_WEBHOOK_TOKEN
 """
     env_path = _write_temp_env(env_content)
     
@@ -235,6 +236,8 @@ TELEGRAM_BOT_TOKEN=ALSO_SECRET_TOKEN_1234567890
         summary = cfg.summary()
         if secret_value in summary:
             raise AssertionError(f"🚨 보안 사고: summary() 에 시크릿 노출됨!\n{summary}")
+        if "VERY_SECRET_DISCORD_WEBHOOK_TOKEN" in summary:
+            raise AssertionError(f"🚨 보안 사고: summary() 에 Discord webhook 노출됨!\n{summary}")
         print(f"  ✓ summary() 에 시크릿 노출 안 됨 (마스킹됨)")
         
         # 마스킹 확인

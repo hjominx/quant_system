@@ -36,8 +36,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from execution.bithumb_client import BithumbClient
 from execution.models import Balances, Candle, Order
+from notifications.discord import (
+    COLOR_DANGER,
+    COLOR_INFO,
+    COLOR_SUCCESS,
+    COLOR_WARNING,
+    DiscordEmbed,
+    DiscordField,
+    DiscordNotifier,
+)
 from risk.live_guard import (
     RiskLimits,
+    RiskGateError,
     assert_risk_allows_action,
     evaluate_risk,
     format_pct,
@@ -424,6 +434,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--live", action="store_true", help="Send real orders. Requires TRADING_MODE=LIVE.")
     parser.add_argument("--yes-i-understand-risk", action="store_true")
+    parser.add_argument("--notify-dry-run", action="store_true", help="Send Discord alerts for dry-run orders/errors.")
     parser.add_argument("--no-file-log", action="store_true", help="Disable file logging for local permission-limited runs.")
     return parser.parse_args()
 
@@ -465,6 +476,86 @@ def print_banner(args: argparse.Namespace, dry_run: bool) -> None:
     print(f"risk_state={args.risk_state_file} kill_switch={args.kill_switch_file}")
 
 
+def notify_safely(
+    *,
+    notifier: DiscordNotifier,
+    embed: DiscordEmbed,
+    dry_run: bool,
+    notify_dry_run: bool,
+) -> None:
+    """Send a Discord alert without letting alert failures affect trading flow."""
+    if dry_run and not notify_dry_run:
+        return
+    if not notifier.enabled:
+        return
+    try:
+        notifier.send(embeds=(embed,))
+    except Exception as exc:
+        print(f"[알림 오류] Discord 전송 실패: {type(exc).__name__}")
+
+
+def build_order_alert_embed(
+    *,
+    plan: PilotPlan,
+    order: Order,
+    market: str,
+    equity: Decimal,
+    dry_run: bool,
+) -> DiscordEmbed:
+    """Build a Discord order alert."""
+    mode = "DRY-RUN" if dry_run else "LIVE"
+    color = COLOR_INFO if dry_run else COLOR_SUCCESS
+    fields = [
+        DiscordField("Mode", mode),
+        DiscordField("Market", market),
+        DiscordField("Action", plan.action),
+        DiscordField("State", order.state.value),
+        DiscordField("Equity", f"{quantize_krw(equity):,} KRW"),
+        DiscordField("UUID", order.uuid, inline=False),
+    ]
+    if plan.krw_amount > 0:
+        fields.append(DiscordField("KRW Amount", f"{plan.krw_amount:,} KRW"))
+    if plan.volume > 0:
+        fields.append(DiscordField("Volume", str(plan.volume)))
+    return DiscordEmbed(
+        title=f"{mode} order requested",
+        description=plan.reason,
+        color=color,
+        fields=tuple(fields),
+    )
+
+
+def build_risk_block_alert_embed(
+    *,
+    action: str,
+    error: Exception,
+    equity: Decimal,
+    dry_run: bool,
+) -> DiscordEmbed:
+    """Build a Discord alert for a risk-gate block."""
+    mode = "DRY-RUN" if dry_run else "LIVE"
+    return DiscordEmbed(
+        title=f"{mode} risk gate blocked {action}",
+        description=str(error),
+        color=COLOR_DANGER,
+        fields=(
+            DiscordField("Equity", f"{quantize_krw(equity):,} KRW"),
+            DiscordField("Action", action),
+        ),
+    )
+
+
+def build_error_alert_embed(*, error: Exception, dry_run: bool) -> DiscordEmbed:
+    """Build a Discord alert for runtime errors."""
+    mode = "DRY-RUN" if dry_run else "LIVE"
+    color = COLOR_WARNING if dry_run else COLOR_DANGER
+    return DiscordEmbed(
+        title=f"{mode} runner error",
+        description=f"{type(error).__name__}: {error}",
+        color=color,
+    )
+
+
 def run_cycle(
     *,
     client: BithumbClient,
@@ -474,6 +565,7 @@ def run_cycle(
     risk_state_path: Path,
     kill_switch_path: Path,
     risk_limits: RiskLimits,
+    notifier: DiscordNotifier,
 ) -> Optional[Order]:
     """Run one guarded decision cycle and optionally place one order."""
     now = datetime.now()
@@ -570,7 +662,21 @@ def run_cycle(
         save_risk_state(risk_state_path, risk_report.state)
 
     if plan.action in ("BUY", "SELL"):
-        assert_risk_allows_action(plan.action, risk_report)
+        try:
+            assert_risk_allows_action(plan.action, risk_report)
+        except RiskGateError as exc:
+            notify_safely(
+                notifier=notifier,
+                embed=build_risk_block_alert_embed(
+                    action=plan.action,
+                    error=exc,
+                    equity=risk_report.equity,
+                    dry_run=dry_run,
+                ),
+                dry_run=dry_run,
+                notify_dry_run=args.notify_dry_run,
+            )
+            raise
         if not dry_run:
             assert_order_quota(
                 state=state,
@@ -586,6 +692,18 @@ def run_cycle(
 
     if not dry_run:
         save_pilot_state(state_path, record_order(state, now))
+    notify_safely(
+        notifier=notifier,
+        embed=build_order_alert_embed(
+            plan=plan,
+            order=order,
+            market=args.market,
+            equity=risk_report.equity,
+            dry_run=dry_run,
+        ),
+        dry_run=dry_run,
+        notify_dry_run=args.notify_dry_run,
+    )
     print("\n주문 요청 완료")
     print(f"uuid={order.uuid} state={order.state.value} dry_run={dry_run}")
     return order
@@ -604,6 +722,7 @@ def main() -> None:
     risk_state_path = Path(args.risk_state_file)
     kill_switch_path = Path(args.kill_switch_file)
     risk_limits = RiskLimits.from_config(cfg)
+    notifier = DiscordNotifier.from_config(cfg)
     client = BithumbClient.from_config(
         cfg,
         dry_run=dry_run,
@@ -622,9 +741,17 @@ def main() -> None:
                     risk_state_path=risk_state_path,
                     kill_switch_path=kill_switch_path,
                     risk_limits=risk_limits,
+                    notifier=notifier,
                 )
             except Exception as exc:
                 print(f"\n[차단/오류] {type(exc).__name__}: {exc}")
+                if not isinstance(exc, RiskGateError):
+                    notify_safely(
+                        notifier=notifier,
+                        embed=build_error_alert_embed(error=exc, dry_run=dry_run),
+                        dry_run=dry_run,
+                        notify_dry_run=args.notify_dry_run,
+                    )
                 if not args.loop:
                     raise
 

@@ -14,8 +14,9 @@
 ### 🧪 Phase 3e: ETH/Cash Regime Switch 최근 레짐 연구 후보
 ### 🧪 Phase 3f: ETH/Cash Micro Live 소액 파일럿 도구
 ### 🧪 Phase 3g: LIVE 전 계좌 위험관리 게이트
+### 🧪 Phase 3h: Discord 거래/위험 알림
 
-**검증 통과: 83개 시나리오 (9 + 9 + 16 + 5 + 11 + 6 + 5 + 4 + 4 + 14)**
+**검증 통과: 87개 시나리오 (9 + 9 + 16 + 5 + 11 + 6 + 5 + 4 + 4 + 14 + 4)**
 
 ## 다음 단계
 - [ ] 다종목 포트폴리오 QPE 검증
@@ -44,6 +45,7 @@ python tests/test_quantum_probability_engine.py
 python tests/test_qpe_trend_overlay.py
 python tests/test_eth_cash_regime.py
 python tests/test_eth_cash_micro_live.py
+python tests/test_discord_notifications.py
 
 # 4. 실데이터 수집 검증 (단일 종목)
 python scripts/test_live_collection.py
@@ -71,11 +73,12 @@ quant_system/
 ├── strategies/         # 전략 인터페이스, SMA, QPE
 ├── backtest/           # 백테스트 엔진, 성과 지표, 복합 Objective, Walk-Forward
 ├── execution/          # 빗썸 클라이언트, 데이터 모델
+├── notifications/      # Discord 등 외부 알림
 ├── utils/              # 설정, 로거, JWT 인증
 ├── data/               # 캐시, 수집기
 │   └── cache/          # OHLCV CSV 캐시
 ├── scripts/            # 실행 스크립트
-├── tests/              # 83개 검증 시나리오
+├── tests/              # 87개 검증 시나리오
 ├── configs/, results/, logs/
 ```
 
@@ -129,4 +132,14 @@ ETH/Cash Regime은 2024년 말 이후 ETH 단순보유가 크게 흔들린 구�
 - 최대 주문금액, 최대 ETH 평가금액, 최소 주문금액, 미체결 주문, 호가 스프레드 게이트를 강제
 - 기본 프로필은 4시간봉 `intraday4h`이며 `--loop`, `--interval-minutes`, `--cooldown-minutes`, `--max-orders-per-day`로 반복 주기를 제어
 - 계좌 위험 게이트가 일일 손실, 주간 손실, MDD, 킬스위치 파일(`logs/KILL_SWITCH_ACTIVE`)을 주문 직전에 강제
+- `DISCORD_WEBHOOK_URL`이 설정되어 있으면 LIVE 주문, 위험 차단, 러너 오류를 Discord로 알림
 - 시장가 매수는 KRW 금액만, 시장가 매도는 ETH 수량만 전송하는 빗썸 V2 비대칭 규칙 준수
+
+## Discord 알림
+
+Discord 서버에서 알림 채널을 만든 뒤 Server Settings → Integrations → Webhooks에서 Webhook URL을 생성하고 `.env`의 `DISCORD_WEBHOOK_URL`에 넣으면 됩니다.
+
+- LIVE 주문 요청 성공 시 주문 방향, 마켓, 금액/수량, 계좌 평가액, 주문 UUID 알림
+- 위험 게이트 차단 시 차단 사유와 계좌 평가액 알림
+- 러너 오류 발생 시 에러 타입과 메시지 알림
+- dry-run 알림은 기본 비활성화이며 `--notify-dry-run`을 붙였을 때만 전송
