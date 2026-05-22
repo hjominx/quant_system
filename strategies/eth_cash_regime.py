@@ -50,6 +50,7 @@ class ETHCashRegimeStrategy(BaseStrategy):
         params.setdefault("rsi_min", 44)
         params.setdefault("rsi_max", 92)
         params.setdefault("vol_window", 20)
+        params.setdefault("periods_per_year", 365)
         params.setdefault("max_entry_volatility", 1.30)
         params.setdefault("exit_volatility", 1.625)
         params.setdefault("target_volatility", 0.38)
@@ -80,6 +81,7 @@ class ETHCashRegimeStrategy(BaseStrategy):
         assert self.params["momentum_window"] > 0
         assert self.params["rsi_window"] > 0
         assert self.params["vol_window"] > 0
+        assert self.params["periods_per_year"] > 0
         assert self.params["breakout_window"] > 0
         assert 0 <= self.params["breakout_tolerance"] < 1
         assert 0 < self.params["min_position"] <= self.params["max_position"] <= 1
@@ -165,7 +167,10 @@ class ETHCashRegimeStrategy(BaseStrategy):
         momentum_5d = close.pct_change(5).iloc[-1]
         momentum_10d = close.pct_change(10).iloc[-1]
         rsi = _rsi(close, p["rsi_window"]).iloc[-1]
-        realized_volatility = returns.rolling(p["vol_window"]).std().iloc[-1] * np.sqrt(365)
+        realized_volatility = (
+            returns.rolling(p["vol_window"]).std().iloc[-1] *
+            np.sqrt(p["periods_per_year"])
+        )
         breakout_level = close.shift(1).rolling(p["breakout_window"]).max().iloc[-1]
 
         current_close = close.iloc[-1]
