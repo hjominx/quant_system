@@ -11,8 +11,9 @@
 ### ✅ Phase 3b: QPE 시장상태 적응형 복합 알파 엔진
 ### ✅ Phase 3c: Sharpe/Sortino/Calmar 복합 Objective ← 최신
 ### 🧪 Phase 3d: QPE Trend Overlay 공격형 연구 후보
+### 🧪 Phase 3e: ETH/Cash Regime Switch 최근 레짐 연구 후보
 
-**검증 통과: 65개 시나리오 (9 + 9 + 16 + 5 + 11 + 6 + 5 + 4)**
+**검증 통과: 69개 시나리오 (9 + 9 + 16 + 5 + 11 + 6 + 5 + 4 + 4)**
 
 ## 다음 단계
 - [ ] 다종목 포트폴리오 QPE 검증
@@ -39,6 +40,7 @@ python tests/test_data.py
 python tests/test_walk_forward.py
 python tests/test_quantum_probability_engine.py
 python tests/test_qpe_trend_overlay.py
+python tests/test_eth_cash_regime.py
 
 # 4. 실데이터 수집 검증 (단일 종목)
 python scripts/test_live_collection.py
@@ -50,6 +52,7 @@ python scripts/download_historical.py
 python scripts/walk_forward_sma.py
 python scripts/walk_forward_qpe.py
 python scripts/walk_forward_qpe_trend_overlay.py
+python scripts/walk_forward_eth_cash_regime.py
 ```
 
 ## 디렉토리 구조
@@ -66,7 +69,7 @@ quant_system/
 ├── data/               # 캐시, 수집기
 │   └── cache/          # OHLCV CSV 캐시
 ├── scripts/            # 실행 스크립트
-├── tests/              # 65개 검증 시나리오
+├── tests/              # 69개 검증 시나리오
 ├── configs/, results/, logs/
 ```
 
@@ -101,3 +104,12 @@ QPE Trend Overlay는 QPE v1의 방어성을 유지하되, SMA/모멘텀/돌파 �
 - BTC OOS: QPE v1보다 수익률은 개선됐지만 SMA Sharpe 기준선은 아직 미달
 - ETH OOS: SMA 기준선보다 Sharpe가 개선된 구간이 확인됨
 - 결론: 실전 전략이 아니라, 다음 포트폴리오/리밸런싱 연구의 중간 후보
+
+## ETH/Cash Regime 연구 후보
+
+ETH/Cash Regime은 2024년 말 이후 ETH 단순보유가 크게 흔들린 구간을 대상으로 만든 희소 진입형 연구 후보입니다.
+
+- 구조: 장기 추세 + 30일 모멘텀 + 60일 돌파 조건이 동시에 맞을 때만 ETH 보유
+- 위험관리: 60일 이탈, 모멘텀 둔화, RSI 약화, 단기 급락, 트레일링 스탑에서 현금 전환
+- 최근 구간: 2024년 말 이후 고정 파라미터 기준 QPE Trend Overlay보다 높은 Sharpe 후보 확인
+- 주의: 전체 5년 Walk-Forward 기준 최종 실전 전략은 아니며, 최근 레짐 필터/리스크 게이트 후보로 분류
