@@ -207,6 +207,22 @@ def test_intraday_profile_uses_4h_volatility_scaling():
     print("  ✓ 4시간봉 연환산/윈도우/트레일링 설정")
 
 
+def test_aggressive_profile_allows_dip_probe():
+    print("\n[테스트 7] 공격형 4시간봉 프로필")
+    print("-" * 60)
+
+    params = strategy_params_for_profile("aggressive4h")
+
+    assert params["periods_per_year"] == 365 * 6
+    assert params["dip_probe_enabled"] is True
+    assert params["use_exit_ma"] is False
+    assert params["max_position"] == 0.70
+    assert params["dip_max_position"] == 0.55
+
+    print("  ✓ 저점 탐색 진입 활성화")
+    print("  ✓ 공격형 비중/청산 설정 적용")
+
+
 def test_order_quota_blocks_cooldown_and_daily_limit():
     print("\n[테스트 7] 주문 쿨다운/일일 한도")
     print("-" * 60)
@@ -479,6 +495,7 @@ def main():
         test_plan_builder_never_exceeds_caps,
         test_spread_gate_blocks_wide_spread,
         test_intraday_profile_uses_4h_volatility_scaling,
+        test_aggressive_profile_allows_dip_probe,
         test_order_quota_blocks_cooldown_and_daily_limit,
         test_risk_state_initializes_and_rolls_periods,
         test_daily_loss_blocks_buy_but_allows_sell,

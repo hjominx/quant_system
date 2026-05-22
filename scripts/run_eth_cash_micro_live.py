@@ -121,6 +121,37 @@ def strategy_params_for_profile(profile: str) -> dict:
             "max_position": 1.00,
             "min_position": 0.20,
         }
+    if profile == "aggressive4h":
+        return {
+            "fast_window": 6,
+            "slow_window": 36,
+            "exit_window": 12,
+            "momentum_window": 9,
+            "momentum_min": 0.015,
+            "rsi_window": 14,
+            "rsi_min": 34,
+            "rsi_max": 92,
+            "vol_window": 12,
+            "periods_per_year": 365 * 6,
+            "max_entry_volatility": 2.20,
+            "exit_volatility": 2.60,
+            "target_volatility": 0.50,
+            "breakout_window": 18,
+            "breakout_tolerance": 0.10,
+            "exit_momentum": -0.10,
+            "exit_rsi": 25,
+            "crash_5d": -0.12,
+            "crash_10d": -0.18,
+            "trailing_stop": 0.09,
+            "max_position": 0.70,
+            "min_position": 0.25,
+            "use_exit_ma": False,
+            "dip_probe_enabled": True,
+            "dip_rsi_min": 26,
+            "dip_rsi_max": 38,
+            "dip_momentum_floor": -0.035,
+            "dip_max_position": 0.55,
+        }
     raise ValueError(f"지원하지 않는 profile: {profile}")
 
 
@@ -433,7 +464,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one guarded ETH/Cash micro-live cycle.")
     parser.add_argument("--market", default=MARKET, help="KRW market. Default: KRW-ETH")
     parser.add_argument("--timeframe", choices=["4h", "1d"], default=DEFAULT_TIMEFRAME)
-    parser.add_argument("--profile", choices=["intraday4h", "daily"], default=DEFAULT_PROFILE)
+    parser.add_argument(
+        "--profile",
+        choices=["intraday4h", "aggressive4h", "daily"],
+        default=DEFAULT_PROFILE,
+    )
     parser.add_argument("--candle-count", type=int, default=DEFAULT_CANDLE_COUNT)
     parser.add_argument("--max-order-krw", type=parse_decimal, default=Decimal("10000"))
     parser.add_argument("--max-position-krw", type=parse_decimal, default=Decimal("30000"))
@@ -475,8 +510,8 @@ def validate_runner_args(args: argparse.Namespace) -> None:
     """Validate runtime argument combinations."""
     if args.market != MARKET:
         raise ValueError("현재 파일럿은 ETH 전용입니다. --market KRW-ETH만 허용합니다.")
-    if args.profile == "intraday4h" and args.timeframe != "4h":
-        raise ValueError("intraday4h profile은 --timeframe 4h와 함께 사용해야 합니다.")
+    if args.profile in ("intraday4h", "aggressive4h") and args.timeframe != "4h":
+        raise ValueError(f"{args.profile} profile은 --timeframe 4h와 함께 사용해야 합니다.")
     if args.profile == "daily" and args.timeframe != "1d":
         raise ValueError("daily profile은 --timeframe 1d와 함께 사용해야 합니다.")
     if args.interval_minutes <= 0:

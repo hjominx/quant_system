@@ -64,6 +64,12 @@ class ETHCashRegimeStrategy(BaseStrategy):
         params.setdefault("trailing_stop", 0.32)
         params.setdefault("max_position", 1.00)
         params.setdefault("min_position", 0.25)
+        params.setdefault("use_exit_ma", True)
+        params.setdefault("dip_probe_enabled", False)
+        params.setdefault("dip_rsi_min", 26)
+        params.setdefault("dip_rsi_max", 38)
+        params.setdefault("dip_momentum_floor", -0.035)
+        params.setdefault("dip_max_position", params["max_position"])
         params.setdefault("required_history_days", max(
             params["slow_window"],
             params["exit_window"],
@@ -89,6 +95,8 @@ class ETHCashRegimeStrategy(BaseStrategy):
         assert self.params["max_entry_volatility"] > 0
         assert self.params["exit_volatility"] > 0
         assert 0 < self.params["trailing_stop"] < 1
+        assert self.params["dip_rsi_min"] < self.params["dip_rsi_max"]
+        assert 0 < self.params["dip_max_position"] <= self.params["max_position"]
 
     def generate_signal(self, ctx: StrategyContext) -> TradeDecision:
         if len(ctx.ohlcv) < self.warmup_period():
@@ -107,8 +115,12 @@ class ETHCashRegimeStrategy(BaseStrategy):
                 self.peak_close > 0 and
                 snapshot.close < self.peak_close * (1 - self.params["trailing_stop"])
             )
+            exit_ma_breach = (
+                self.params.get("use_exit_ma", True) and
+                snapshot.close < snapshot.exit_ma
+            )
             should_exit = (
-                snapshot.close < snapshot.exit_ma or
+                exit_ma_breach or
                 snapshot.momentum < self.params["exit_momentum"] or
                 snapshot.rsi < self.params["exit_rsi"] or
                 snapshot.realized_volatility > self.params["exit_volatility"] or
@@ -130,7 +142,7 @@ class ETHCashRegimeStrategy(BaseStrategy):
             )
 
         self.peak_close = 0.0
-        should_enter = (
+        breakout_entry = (
             snapshot.trend_ready and
             snapshot.breakout_ready and
             snapshot.momentum > self.params["momentum_min"] and
@@ -139,13 +151,30 @@ class ETHCashRegimeStrategy(BaseStrategy):
             not snapshot.crash_risk and
             snapshot.target_weight > 0
         )
-        if should_enter:
+        if breakout_entry:
             self.peak_close = snapshot.close
             return TradeDecision(
                 signal=Signal.BUY,
                 target_weight=snapshot.target_weight,
                 reason=f"ETH/Cash breakout entry | {reason}",
                 confidence=0.85,
+            )
+
+        dip_probe_entry = (
+            self.params["dip_probe_enabled"] and
+            self.params["dip_rsi_min"] <= snapshot.rsi <= self.params["dip_rsi_max"] and
+            snapshot.momentum > self.params["dip_momentum_floor"] and
+            snapshot.realized_volatility < self.params["max_entry_volatility"] and
+            not snapshot.crash_risk and
+            snapshot.target_weight > 0
+        )
+        if dip_probe_entry:
+            self.peak_close = snapshot.close
+            return TradeDecision(
+                signal=Signal.BUY,
+                target_weight=min(snapshot.target_weight, self.params["dip_max_position"]),
+                reason=f"ETH/Cash aggressive dip entry | {reason}",
+                confidence=0.60,
             )
 
         return TradeDecision(
