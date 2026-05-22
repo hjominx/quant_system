@@ -6,12 +6,12 @@
 ### ✅ Phase 2a: 안전한 설정 관리
 ### ✅ Phase 2b: 빗썸 API 2.0 클라이언트
 ### ✅ Phase 2c: 실제 빗썸 연결 검증
-### ✅ Phase 2d: 데이터 수집 모듈 ← 최신
+### ✅ Phase 2d: 데이터 수집 모듈
+### ✅ Phase 3a: Walk-Forward 검증 엔진 ← 최신
 
-**검증 통과: 50개 시나리오 (9 + 9 + 16 + 5 + 11)**
+**검증 통과: 55개 시나리오 (9 + 9 + 16 + 5 + 11 + 5)**
 
 ## 다음 단계 (Phase 3)
-- [ ] Walk-Forward 검증 엔진
 - [ ] 위험관리 레이어
 - [ ] 실전 전략 구현 (추세추종 + 평균회귀 + 변동성 타게팅)
 
@@ -32,12 +32,16 @@ python tests/test_auth.py
 python tests/test_bithumb_client.py
 python tests/test_backtest_engine.py
 python tests/test_data.py
+python tests/test_walk_forward.py
 
 # 4. 실데이터 수집 검증 (단일 종목)
 python scripts/test_live_collection.py
 
 # 5. 5년치 데이터 일괄 다운로드
 python scripts/download_historical.py
+
+# 6. Walk-Forward 검증
+python scripts/walk_forward_sma.py
 ```
 
 ## 디렉토리 구조
@@ -45,13 +49,13 @@ python scripts/download_historical.py
 ```
 quant_system/
 ├── strategies/         # 전략 인터페이스
-├── backtest/           # 백테스트 엔진, 성과 지표
+├── backtest/           # 백테스트 엔진, 성과 지표, Walk-Forward
 ├── execution/          # 빗썸 클라이언트, 데이터 모델
 ├── utils/              # 설정, 로거, JWT 인증
 ├── data/               # 캐시, 수집기 (NEW)
 │   └── cache/          # OHLCV CSV 캐시
 ├── scripts/            # 실행 스크립트 (NEW)
-├── tests/              # 47개 검증 시나리오
+├── tests/              # 55개 검증 시나리오
 ├── risk/               # (예정) 위험관리
 ├── configs/, results/, logs/
 ```
@@ -65,5 +69,5 @@ quant_system/
 - ✅ 시크릿 자동 마스킹
 - ✅ Look-ahead bias 수학적 방지
 - ✅ 거래비용 강제 반영
-- ✅ Walk-Forward 검증 (예정)
+- ✅ Walk-Forward 검증
 - ✅ 증분 데이터 업데이트
