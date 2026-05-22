@@ -289,8 +289,9 @@ def test_collector_pagination():
                 # to 없으면 가장 최신부터 count개
                 idx_start = 0
             else:
-                # to 시각보다 이전 봉들 찾기 (인덱스 슬라이싱)
-                to_dt = datetime.fromisoformat(to.replace('Z', '+00:00'))
+                # 'to' 형식: 'YYYY-MM-DD HH:MM:SS' (UTC, timezone 없음)
+                # naive datetime을 만든 후 UTC timezone 부여
+                to_dt = datetime.strptime(to, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
                 idx_start = next(
                     (i for i, c in enumerate(all_candles)
                      if c.candle_datetime_utc < to_dt),

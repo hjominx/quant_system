@@ -18,7 +18,6 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
 from typing import List, Optional
 
 import pandas as pd
@@ -29,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from execution.bithumb_client import BithumbClient
 from execution.models import Candle
-from data.cache import OHLCVCache, CacheError
+from data.cache import OHLCVCache
 
 logger = logging.getLogger(__name__)
 
@@ -40,24 +39,6 @@ MAX_CANDLES_PER_REQUEST = 200
 # 안전한 요청 간격 (빗썸 한계 150/s 의 약 5% 사용)
 # 동시성 없이 순차 호출이라 사실 더 빨라도 되지만 안전 마진 두기
 DEFAULT_REQUEST_INTERVAL_SEC = 0.2  # 초당 5회 (빗썸 한계 150/s의 3%)
-
-
-# 타임프레임별 일수 (페이지네이션 시 to 파라미터 계산용)
-TIMEFRAME_TO_DAYS = {
-    '1m': 200 / (24 * 60),       # 200분 = 약 0.14일
-    '3m': 200 * 3 / (24 * 60),
-    '5m': 200 * 5 / (24 * 60),
-    '10m': 200 * 10 / (24 * 60),
-    '15m': 200 * 15 / (24 * 60),
-    '30m': 200 * 30 / (24 * 60),
-    '60m': 200 / 24,              # 200시간 = 약 8.3일
-    '1h': 200 / 24,
-    '240m': 200 * 4 / 24,         # 800시간 = 약 33.3일
-    '4h': 200 * 4 / 24,
-    '1d': 200,                     # 200일
-    '1w': 200 * 7,
-    '1M': 200 * 30,                # 대략
-}
 
 
 class CollectorError(Exception):
@@ -122,6 +103,10 @@ class OHLCVCollector:
             OHLCV DataFrame (DatetimeIndex, 시간 오름차순)
         """
         to_str = self._format_datetime(to) if to else None
+        
+        # 디버그용 로그 (페이지네이션 추적)
+        if to_str:
+            logger.debug(f"get_candles({market}, {timeframe}, count={count}, to='{to_str}')")
         
         candles = self.client.get_candles(
             market=market,
@@ -378,6 +363,9 @@ class OHLCVCollector:
         for c in candles:
             # KST 기준 시각 사용 (한국 거래소이므로)
             timestamp = c.candle_datetime_kst or c.candle_datetime_utc
+            # timezone 안전성 보장 (naive datetime이면 UTC 가정)
+            if timestamp is not None and timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
             records.append({
                 'timestamp': timestamp,
                 'open': float(c.opening_price),
@@ -390,6 +378,10 @@ class OHLCVCollector:
         df = pd.DataFrame(records)
         df = df.set_index('timestamp')
         
+        # 인덱스가 timezone-aware인지 보장 (mixed timezone 방지)
+        if df.index.tz is None:
+            df.index = df.index.tz_localize('UTC')
+        
         # 시간 오름차순 정렬 (빗썸은 최신순으로 주므로 뒤집기)
         df = df.sort_index()
         
@@ -397,11 +389,16 @@ class OHLCVCollector:
     
     @staticmethod
     def _format_datetime(dt: datetime) -> str:
-        """빗썸 API에 보낼 datetime 형식 (ISO 8601)"""
+        """빗썸 API에 보낼 datetime 형식
+        
+        실측 검증된 형식: 'YYYY-MM-DD HH:MM:SS' (timezone 없음)
+        UTC 기준으로 변환 후 timezone 정보를 떼고 보냄.
+        """
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        # 빗썸 캔들 API의 to 파라미터는 timezone 없이 'YYYY-MM-DD HH:MM:SS' 형식을 사용합니다.
-        return dt.strftime('%Y-%m-%d %H:%M:%S')
+        # UTC로 변환 후 timezone 정보 제거하고 단순 형식
+        dt_utc = dt.astimezone(timezone.utc)
+        return dt_utc.strftime('%Y-%m-%d %H:%M:%S')
     
     def collect_multiple(
         self,

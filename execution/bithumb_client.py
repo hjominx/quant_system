@@ -28,7 +28,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.auth import JWTAuthenticator
 from execution.errors import (
     BithumbError,
-    InvalidRequestError,
     NetworkError,
     RetryableError,
     classify_http_error,
@@ -277,16 +276,18 @@ class BithumbClient:
             logger.error(f"{method} {endpoint} 실패: {error}")
             raise error
         
-        # 일부 빗썸 API는 HTTP 200이더라도 body에 error 객체를 담아 반환합니다.
+        # 일부 빗썸 API는 HTTP 200 이더라도 body에 error 객체를 담아 반환.
+        # 이 경우도 명시적으로 에러 처리해서 "string indices must be integers" 같은
+        # 후속 에러를 방지함.
         if isinstance(data, dict) and 'error' in data:
             error = classify_http_error(
                 status_code=response.status_code,
                 response_data=data,
                 response_text=response.text,
             )
-            logger.error(f"{method} {endpoint} 실패: {error}")
+            logger.error(f"{method} {endpoint} 실패 (HTTP 200 + body error): {error}")
             raise error
-
+        
         logger.debug(f"{method} {endpoint} 성공: {response.status_code}")
         return data
     
@@ -425,12 +426,34 @@ class BithumbClient:
             params['to'] = to
         
         data = self._request('GET', endpoint, params=params, requires_auth=False)
+        
+        # 응답 형식 검증 (빗썸이 가끔 에러를 200 OK로 보낼 경우 대비)
         if not isinstance(data, list):
-            raise InvalidRequestError(
-                f"캔들 응답 형식 오류: 예상된 list가 아닙니다.",
-                response_data=data,
-                status_code=200,
+            # dict가 오면 보통 에러 응답
+            if isinstance(data, dict) and 'error' in data:
+                error_info = data.get('error', {})
+                error_name = error_info.get('name', 'unknown')
+                error_msg = error_info.get('message', str(data))
+                raise BithumbError(
+                    f"빗썸 캔들 조회 에러: {error_name} - {error_msg} "
+                    f"(market={market}, unit={unit}, to={params.get('to')})"
+                )
+            raise BithumbError(
+                f"예상치 못한 응답 형식: list 기대, {type(data).__name__} 받음. "
+                f"응답: {str(data)[:200]}"
             )
+        
+        # 빈 응답은 정상 (예: 그 기간에 데이터 없음)
+        if not data:
+            return []
+        
+        # 각 항목이 dict인지 확인 (이전 string indices 에러 방지)
+        if not all(isinstance(item, dict) for item in data):
+            raise BithumbError(
+                f"응답 데이터 형식 오류: 각 항목이 dict가 아님. "
+                f"첫 항목: {type(data[0]).__name__}, 값: {str(data[0])[:100]}"
+            )
+        
         return [Candle.from_dict(d) for d in data]
     
     # ========================================================
