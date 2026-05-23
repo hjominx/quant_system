@@ -74,17 +74,19 @@ DEFAULT_CANDLE_COUNT = 200
 KRW_QUANT = Decimal("1")
 VOLUME_QUANT = Decimal("0.00000001")
 ADAPTIVE_ALPHA_PROFILES = {"stable_quality"}
-SCALP_PROFILES = {"scalp_active"}
-RUNTIME_PROFILE_CHOICES = {"stable_quality", "scalp_active"}
+SCALP_PROFILES = {"scalp_active", "scalp_1m"}
+RUNTIME_PROFILE_CHOICES = {"stable_quality", "scalp_active", "scalp_1m"}
 PROFILE_DEFAULT_TIMEFRAMES = {
     "daily": "1d",
     "intraday4h": "4h",
     "aggressive4h": "4h",
     "stable_quality": "4h",
     "scalp_active": "5m",
+    "scalp_1m": "1m",
 }
 PROFILE_DEFAULT_CANDLE_COUNTS = {
     "scalp_active": 200,
+    "scalp_1m": 200,
 }
 
 
@@ -221,6 +223,36 @@ def strategy_params_for_profile(profile: str) -> dict:
             "min_position": 0.25,
             "max_position": 0.85,
         }
+    if profile == "scalp_1m":
+        return {
+            "fast_ema": 8,
+            "slow_ema": 34,
+            "trend_ema": 89,
+            "momentum_window": 2,
+            "min_momentum": 0.0005,
+            "rsi_entry_min": 40,
+            "rsi_entry_max": 78,
+            "rsi_exit": 35,
+            "atr_window": 14,
+            "min_atr_pct": 0.00020,
+            "max_atr_pct": 0.012,
+            "vol_window": 48,
+            "periods_per_year": 365 * 24 * 60,
+            "max_realized_volatility": 3.80,
+            "target_volatility": 0.70,
+            "breakout_window": 20,
+            "breakout_tolerance": 0.0025,
+            "pullback_tolerance": 0.0045,
+            "volume_window": 30,
+            "min_volume_ratio": 0.65,
+            "take_profit_pct": 0.0040,
+            "stop_loss_pct": 0.0030,
+            "trailing_stop_pct": 0.0040,
+            "crash_3bar": -0.008,
+            "crash_6bar": -0.014,
+            "min_position": 0.25,
+            "max_position": 0.85,
+        }
     raise ValueError(f"지원하지 않는 profile: {profile}")
 
 
@@ -251,8 +283,8 @@ def validate_profile_timeframe(profile: str, timeframe: str) -> None:
         raise ValueError("daily profile은 --timeframe 1d와 함께 사용해야 합니다.")
     if profile in ("intraday4h", "aggressive4h", "stable_quality") and timeframe != "4h":
         raise ValueError(f"{profile} profile은 --timeframe 4h와 함께 사용해야 합니다.")
-    if profile == "scalp_active" and timeframe != expected:
-        raise ValueError(f"scalp_active profile은 --timeframe {expected}와 함께 사용해야 합니다.")
+    if profile in SCALP_PROFILES and timeframe != expected:
+        raise ValueError(f"{profile} profile은 --timeframe {expected}와 함께 사용해야 합니다.")
 
 
 def load_runtime_profile_mode(path: Path) -> Optional[str]:
@@ -346,6 +378,7 @@ def assert_order_quota(
     now: datetime,
     max_orders_per_day: int,
     cooldown_minutes: int,
+    cooldown_seconds: Optional[int] = None,
 ) -> None:
     """Reject a live order when daily count or cooldown would be violated."""
     if state.orders_today >= max_orders_per_day:
@@ -355,11 +388,16 @@ def assert_order_quota(
     if not state.last_order_at:
         return
     last_order_at = datetime.fromisoformat(state.last_order_at)
-    cooldown = timedelta(minutes=cooldown_minutes)
+    cooldown = timedelta(seconds=cooldown_seconds) if cooldown_seconds is not None else timedelta(minutes=cooldown_minutes)
     if now - last_order_at < cooldown:
         remaining = cooldown - (now - last_order_at)
+        remaining_seconds = remaining.total_seconds()
+        if remaining_seconds < 60:
+            wait = f"{remaining_seconds:.0f}초"
+        else:
+            wait = f"{remaining_seconds/60:.1f}분"
         raise RuntimeError(
-            f"쿨다운 중: 다음 주문까지 약 {remaining.total_seconds()/60:.1f}분"
+            f"쿨다운 중: 다음 주문까지 약 {wait}"
         )
 
 
@@ -620,7 +658,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--profile",
-        choices=["intraday4h", "aggressive4h", "daily", "stable_quality", "scalp_active"],
+        choices=["intraday4h", "aggressive4h", "daily", "stable_quality", "scalp_active", "scalp_1m"],
         default=DEFAULT_PROFILE,
     )
     parser.add_argument("--candle-count", type=int, default=DEFAULT_CANDLE_COUNT)
@@ -636,6 +674,12 @@ def parse_args() -> argparse.Namespace:
         help="Sleep to the next wall-clock interval boundary, e.g. 00/15/30/45.",
     )
     parser.add_argument("--cooldown-minutes", type=int, default=240)
+    parser.add_argument(
+        "--cooldown-seconds",
+        type=int,
+        default=None,
+        help="Override cooldown in seconds. Use carefully for high-frequency pilots.",
+    )
     parser.add_argument("--max-orders-per-day", type=int, default=4)
     parser.add_argument(
         "--status-alert-interval-minutes",
@@ -686,6 +730,8 @@ def validate_runner_args(args: argparse.Namespace) -> None:
         raise ValueError("--align-interval-to-clock은 하루를 나누는 interval에서만 사용하세요.")
     if args.cooldown_minutes < 0:
         raise ValueError("--cooldown-minutes는 0 이상이어야 합니다.")
+    if args.cooldown_seconds is not None and args.cooldown_seconds < 0:
+        raise ValueError("--cooldown-seconds는 0 이상이어야 합니다.")
     if args.max_orders_per_day <= 0:
         raise ValueError("--max-orders-per-day는 1 이상이어야 합니다.")
     if args.status_alert_interval_minutes < 0:
@@ -713,7 +759,8 @@ def print_banner(args: argparse.Namespace, dry_run: bool) -> None:
     )
     print(
         f"loop={args.loop} interval={args.interval_minutes}m "
-        f"cooldown={args.cooldown_minutes}m max_orders/day={args.max_orders_per_day}"
+        f"cooldown={format_cooldown(args.cooldown_minutes, args.cooldown_seconds)} "
+        f"max_orders/day={args.max_orders_per_day}"
     )
     clock_mode = " clock" if args.status_alert_on_hour else ""
     print(f"discord_status_interval={args.status_alert_interval_minutes}m{clock_mode}")
@@ -858,6 +905,17 @@ def calculate_sleep_seconds(
     if next_boundary > 24 * 3600:
         next_boundary = 24 * 3600
     return max(next_boundary - seconds_since_midnight, 1)
+
+
+def format_cooldown(cooldown_minutes: int, cooldown_seconds: Optional[int]) -> str:
+    """Format order cooldown for logs."""
+    if cooldown_seconds is not None:
+        if cooldown_seconds < 60:
+            return f"{cooldown_seconds}s"
+        if cooldown_seconds % 60 == 0:
+            return f"{cooldown_seconds // 60}m"
+        return f"{cooldown_seconds / 60:.1f}m"
+    return f"{cooldown_minutes}m"
 
 
 def format_sleep_wait(seconds: int) -> str:
@@ -1106,6 +1164,7 @@ def run_cycle(
                 now=now,
                 max_orders_per_day=args.max_orders_per_day,
                 cooldown_minutes=args.cooldown_minutes,
+                cooldown_seconds=args.cooldown_seconds,
             )
 
     order = execute_plan(client, args.market, plan)

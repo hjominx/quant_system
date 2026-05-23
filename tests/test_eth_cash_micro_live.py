@@ -36,6 +36,7 @@ from scripts.run_eth_cash_micro_live import (
     calculate_sell_volume,
     clock_status_alert_due,
     format_sleep_wait,
+    format_cooldown,
     load_runtime_profile_mode,
     record_order,
     record_status_alert,
@@ -264,8 +265,24 @@ def test_scalp_active_profile_uses_micro_scalper():
     print("  ✓ 5분봉 스캘핑 파라미터 적용")
 
 
+def test_scalp_1m_profile_uses_micro_scalper():
+    print("\n[테스트 10] 1분봉 스캘핑 프로필")
+    print("-" * 60)
+
+    strategy = build_strategy_for_profile("scalp_1m")
+
+    assert isinstance(strategy, ETHMicroScalperStrategy)
+    assert strategy.params["periods_per_year"] == 365 * 24 * 60
+    assert strategy.params["take_profit_pct"] == 0.0040
+    assert strategy.params["stop_loss_pct"] == 0.0030
+    assert strategy.params["max_position"] == 0.85
+
+    print("  ✓ scalp_1m이 ETHMicroScalperStrategy로 연결됨")
+    print("  ✓ 1분봉 초공격 스캘핑 파라미터 적용")
+
+
 def test_runtime_profile_mode_file_switches_stable_and_scalp():
-    print("\n[테스트 10] 런타임 프로필 파일")
+    print("\n[테스트 11] 런타임 프로필 파일")
     print("-" * 60)
 
     class Args:
@@ -292,11 +309,16 @@ def test_runtime_profile_mode_file_switches_stable_and_scalp():
         assert stable.profile == "stable_quality"
         assert stable.timeframe == "4h"
 
+        save_runtime_profile_mode(path, "scalp_1m", updated_by="test")
+        scalp_1m = resolve_runtime_profile(Args, path)
+        assert scalp_1m.profile == "scalp_1m"
+        assert scalp_1m.timeframe == "1m"
+
     print("  ✓ Discord 모드 파일로 stable/scalp 전환 가능")
 
 
 def test_order_quota_blocks_cooldown_and_daily_limit():
-    print("\n[테스트 11] 주문 쿨다운/일일 한도")
+    print("\n[테스트 12] 주문 쿨다운/일일 한도")
     print("-" * 60)
 
     now = datetime(2026, 5, 22, 9, 0, 0)
@@ -339,6 +361,41 @@ def test_order_quota_blocks_cooldown_and_daily_limit():
         pass
 
     print("  ✓ 쿨다운과 일일 주문 한도 적용")
+
+
+def test_order_quota_supports_second_cooldown():
+    print("\n[테스트 13] 초 단위 주문 쿨다운")
+    print("-" * 60)
+
+    now = datetime(2026, 5, 22, 9, 0, 0)
+    state = PilotState(
+        date=now.date().isoformat(),
+        orders_today=1,
+        last_order_at=now.isoformat(),
+    )
+
+    try:
+        assert_order_quota(
+            state=state,
+            now=now + timedelta(seconds=5),
+            max_orders_per_day=300,
+            cooldown_minutes=15,
+            cooldown_seconds=10,
+        )
+        raise AssertionError("10초 쿨다운 중 주문이 허용됨")
+    except RuntimeError as exc:
+        assert "초" in str(exc)
+
+    assert_order_quota(
+        state=state,
+        now=now + timedelta(seconds=10),
+        max_orders_per_day=300,
+        cooldown_minutes=15,
+        cooldown_seconds=10,
+    )
+    assert format_cooldown(15, 10) == "10s"
+
+    print("  ✓ 10초 쿨다운 적용")
 
 
 def test_risk_state_initializes_and_rolls_periods():
@@ -600,8 +657,10 @@ def main():
         test_aggressive_profile_allows_dip_probe,
         test_stable_quality_profile_uses_adaptive_alpha,
         test_scalp_active_profile_uses_micro_scalper,
+        test_scalp_1m_profile_uses_micro_scalper,
         test_runtime_profile_mode_file_switches_stable_and_scalp,
         test_order_quota_blocks_cooldown_and_daily_limit,
+        test_order_quota_supports_second_cooldown,
         test_risk_state_initializes_and_rolls_periods,
         test_daily_loss_blocks_buy_but_allows_sell,
         test_weekly_loss_blocks_buy,

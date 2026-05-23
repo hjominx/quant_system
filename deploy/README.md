@@ -8,13 +8,13 @@ pilot server. Secrets stay in `.env` on the server and must not be committed.
 Current pilot profile:
 
 - Strategy profile: `stable_quality`
-- Runtime modes: `stable_quality` (`4h`) or `scalp_active` (`5m`)
+- Runtime modes: `stable_quality` (`4h`), `scalp_active` (`5m`), or `scalp_1m` (`1m`)
 - Mode file: `logs/eth_cash_live_profile.json`
-- Loop interval: 5 minutes, aligned to clock boundaries
+- Loop interval: 1 minute, aligned to clock boundaries
 - Max order: 50,000 KRW
 - Max ETH position: 200,000 KRW
-- Cooldown: 15 minutes
-- Max orders per day: 48
+- Cooldown: 10 seconds
+- Max orders per day: 300
 - Discord status: hourly, on the hour
 
 Install or refresh the service on AWS:
@@ -29,7 +29,7 @@ sudo systemctl daemon-reload
 sudo systemctl restart quant-eth-cash-live
 sudo systemctl restart quant-discord-control
 
-systemctl cat quant-eth-cash-live | grep -E -- '--profile|--profile-mode-file|--max-order-krw|--max-position-krw|--cooldown-minutes|--max-orders-per-day|--interval-minutes'
+systemctl cat quant-eth-cash-live | grep -E -- '--profile|--profile-mode-file|--max-order-krw|--max-position-krw|--cooldown-seconds|--max-orders-per-day|--interval-minutes'
 journalctl -u quant-eth-cash-live -n 80 --no-pager
 ```
 
@@ -52,5 +52,12 @@ python - <<'PY'
 from pathlib import Path
 from scripts.run_eth_cash_micro_live import save_runtime_profile_mode
 save_runtime_profile_mode(Path("logs/eth_cash_live_profile.json"), "scalp_active", updated_by="ssh")
+PY
+
+# Scalp 1m mode
+python - <<'PY'
+from pathlib import Path
+from scripts.run_eth_cash_micro_live import save_runtime_profile_mode
+save_runtime_profile_mode(Path("logs/eth_cash_live_profile.json"), "scalp_1m", updated_by="ssh")
 PY
 ```

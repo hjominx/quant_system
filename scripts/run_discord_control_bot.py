@@ -125,6 +125,7 @@ class QuantControlController:
         max_spread_pct: Decimal,
         max_orders_per_day: int,
         cooldown_minutes: int,
+        cooldown_seconds: Optional[int],
     ):
         self.config = config
         self.market = market
@@ -141,6 +142,7 @@ class QuantControlController:
         self.max_spread_pct = max_spread_pct
         self.max_orders_per_day = max_orders_per_day
         self.cooldown_minutes = cooldown_minutes
+        self.cooldown_seconds = cooldown_seconds
         self.client = BithumbClient.from_config(
             config,
             dry_run=True,
@@ -364,6 +366,7 @@ class QuantControlController:
             now=now,
             max_orders_per_day=self.max_orders_per_day,
             cooldown_minutes=self.cooldown_minutes,
+            cooldown_seconds=self.cooldown_seconds,
         )
 
     def _record_manual_order(self, now: datetime) -> None:
@@ -543,9 +546,13 @@ class ControlPanelView(discord.ui.View):
     async def stable_mode_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self._request_profile_mode(interaction, "stable_quality")
 
-    @discord.ui.button(label="Scalp Mode", style=discord.ButtonStyle.danger, custom_id="quant:mode:scalp", row=4)
-    async def scalp_mode_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    @discord.ui.button(label="Scalp 5m", style=discord.ButtonStyle.danger, custom_id="quant:mode:scalp5m", row=4)
+    async def scalp_5m_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self._request_profile_mode(interaction, "scalp_active")
+
+    @discord.ui.button(label="Scalp 1m", style=discord.ButtonStyle.danger, custom_id="quant:mode:scalp1m", row=4)
+    async def scalp_1m_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._request_profile_mode(interaction, "scalp_1m")
 
     async def _request_profile_mode(self, interaction: discord.Interaction, profile: str) -> None:
         if not await self._require_admin(interaction):
@@ -904,6 +911,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-spread-pct", type=Decimal, default=Decimal("0.005"))
     parser.add_argument("--max-orders-per-day", type=int, default=12)
     parser.add_argument("--cooldown-minutes", type=int, default=60)
+    parser.add_argument("--cooldown-seconds", type=int, default=None)
     parser.add_argument(
         "--no-sticky-panel",
         action="store_true",
@@ -941,6 +949,7 @@ def main() -> None:
         max_spread_pct=args.max_spread_pct,
         max_orders_per_day=args.max_orders_per_day,
         cooldown_minutes=args.cooldown_minutes,
+        cooldown_seconds=args.cooldown_seconds,
     )
     intents = discord.Intents.default()
     if not args.no_sticky_panel:

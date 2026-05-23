@@ -9,7 +9,7 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/quant_system
 Environment=PYTHONUNBUFFERED=1
 Environment=TRADING_MODE=LIVE
-ExecStart=/home/ubuntu/quant_system/venv/bin/python -B /home/ubuntu/quant_system/scripts/run_eth_cash_micro_live.py --loop --live --yes-i-understand-risk --profile stable_quality --timeframe 4h --profile-mode-file logs/eth_cash_live_profile.json --max-order-krw 50000 --max-position-krw 200000 --max-orders-per-day 48 --cooldown-minutes 15 --interval-minutes 5 --align-interval-to-clock --status-alert-interval-minutes 60 --status-alert-on-hour --no-file-log
+ExecStart=/home/ubuntu/quant_system/venv/bin/python -B /home/ubuntu/quant_system/scripts/run_eth_cash_micro_live.py --loop --live --yes-i-understand-risk --profile stable_quality --timeframe 4h --profile-mode-file logs/eth_cash_live_profile.json --max-order-krw 50000 --max-position-krw 200000 --max-orders-per-day 300 --cooldown-seconds 10 --interval-minutes 1 --align-interval-to-clock --status-alert-interval-minutes 60 --status-alert-on-hour --no-file-log
 Restart=always
 RestartSec=10
 
