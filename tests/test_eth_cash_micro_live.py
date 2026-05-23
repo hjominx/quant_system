@@ -29,6 +29,7 @@ from scripts.run_eth_cash_micro_live import (
     PilotState,
     assert_order_quota,
     assert_spread_ok,
+    build_strategy_for_profile,
     build_pilot_plan,
     calculate_buy_amount,
     calculate_sleep_seconds,
@@ -42,6 +43,7 @@ from scripts.run_eth_cash_micro_live import (
     validate_live_permission,
 )
 from strategies.base import Signal, TradeDecision
+from strategies.eth_adaptive_alpha import ETHAdaptiveAlphaStrategy
 
 
 class FakeConfig:
@@ -226,8 +228,24 @@ def test_aggressive_profile_allows_dip_probe():
     print("  ✓ 공격형 비중/청산 설정 적용")
 
 
+def test_stable_quality_profile_uses_adaptive_alpha():
+    print("\n[테스트 8] 안정형 적응 알파 프로필")
+    print("-" * 60)
+
+    strategy = build_strategy_for_profile("stable_quality")
+
+    assert isinstance(strategy, ETHAdaptiveAlphaStrategy)
+    assert strategy.params["periods_per_year"] == 365 * 6
+    assert strategy.params["max_realized_volatility"] == 0.90
+    assert strategy.params["hard_stop_pct"] == 0.035
+    assert strategy.params["max_position"] == 0.55
+
+    print("  ✓ stable_quality가 ETHAdaptiveAlphaStrategy로 연결됨")
+    print("  ✓ 리서치 프리셋의 방어형 파라미터 적용")
+
+
 def test_order_quota_blocks_cooldown_and_daily_limit():
-    print("\n[테스트 7] 주문 쿨다운/일일 한도")
+    print("\n[테스트 9] 주문 쿨다운/일일 한도")
     print("-" * 60)
 
     now = datetime(2026, 5, 22, 9, 0, 0)
@@ -529,6 +547,7 @@ def main():
         test_spread_gate_blocks_wide_spread,
         test_intraday_profile_uses_4h_volatility_scaling,
         test_aggressive_profile_allows_dip_probe,
+        test_stable_quality_profile_uses_adaptive_alpha,
         test_order_quota_blocks_cooldown_and_daily_limit,
         test_risk_state_initializes_and_rolls_periods,
         test_daily_loss_blocks_buy_but_allows_sell,

@@ -3,7 +3,7 @@ ETH/Cash micro live runner.
 
 This script runs guarded decision cycles for KRW-ETH:
 1. Pull recent 4h or daily candles from Bithumb.
-2. Evaluate ETHCashRegimeStrategy.
+2. Evaluate the selected ETH/Cash strategy profile.
 3. Check balances, open orders, spread, account risk, and micro-live caps.
 4. Place at most one market order.
 
@@ -60,6 +60,7 @@ from risk.live_guard import (
     save_risk_state,
 )
 from strategies.base import Signal, StrategyContext, TradeDecision
+from strategies.eth_adaptive_alpha import ETHAdaptiveAlphaStrategy
 from strategies.eth_cash_regime import ETHCashRegimeStrategy
 from utils.config import Config, get_config
 from utils.logger import setup_logging
@@ -71,6 +72,7 @@ DEFAULT_PROFILE = "intraday4h"
 DEFAULT_CANDLE_COUNT = 200
 KRW_QUANT = Decimal("1")
 VOLUME_QUANT = Decimal("0.00000001")
+ADAPTIVE_ALPHA_PROFILES = {"stable_quality"}
 
 
 @dataclass(frozen=True)
@@ -93,7 +95,7 @@ class PilotState:
 
 
 def strategy_params_for_profile(profile: str) -> dict:
-    """Return ETHCashRegime parameters for a named live-trading profile."""
+    """Return strategy parameters for a named live-trading profile."""
     if profile == "daily":
         return {"periods_per_year": 365}
     if profile == "intraday4h":
@@ -152,7 +154,34 @@ def strategy_params_for_profile(profile: str) -> dict:
             "dip_momentum_floor": -0.035,
             "dip_max_position": 0.55,
         }
+    if profile == "stable_quality":
+        return {
+            "fast_ema": 8,
+            "mid_ema": 36,
+            "long_ema": 120,
+            "donchian_window": 54,
+            "exit_donchian_window": 24,
+            "min_momentum": 0.040,
+            "min_adx": 26,
+            "entry_score": 0.70,
+            "exit_score": 0.42,
+            "target_volatility": 0.26,
+            "max_position": 0.55,
+            "cooldown_bars": 40,
+            "max_realized_volatility": 0.90,
+            "max_atr_pct": 0.085,
+            "breakout_tolerance": 0.030,
+            "hard_stop_pct": 0.035,
+        }
     raise ValueError(f"지원하지 않는 profile: {profile}")
+
+
+def build_strategy_for_profile(profile: str):
+    """Build the strategy implementation mapped to a live profile."""
+    params = strategy_params_for_profile(profile)
+    if profile in ADAPTIVE_ALPHA_PROFILES:
+        return ETHAdaptiveAlphaStrategy(params=params)
+    return ETHCashRegimeStrategy(params=params)
 
 
 def load_pilot_state(path: Path, now: datetime) -> PilotState:
@@ -466,7 +495,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeframe", choices=["4h", "1d"], default=DEFAULT_TIMEFRAME)
     parser.add_argument(
         "--profile",
-        choices=["intraday4h", "aggressive4h", "daily"],
+        choices=["intraday4h", "aggressive4h", "daily", "stable_quality"],
         default=DEFAULT_PROFILE,
     )
     parser.add_argument("--candle-count", type=int, default=DEFAULT_CANDLE_COUNT)
@@ -520,7 +549,7 @@ def validate_runner_args(args: argparse.Namespace) -> None:
     """Validate runtime argument combinations."""
     if args.market != MARKET:
         raise ValueError("현재 파일럿은 ETH 전용입니다. --market KRW-ETH만 허용합니다.")
-    if args.profile in ("intraday4h", "aggressive4h") and args.timeframe != "4h":
+    if args.profile in ("intraday4h", "aggressive4h", "stable_quality") and args.timeframe != "4h":
         raise ValueError(f"{args.profile} profile은 --timeframe 4h와 함께 사용해야 합니다.")
     if args.profile == "daily" and args.timeframe != "1d":
         raise ValueError("daily profile은 --timeframe 1d와 함께 사용해야 합니다.")
@@ -809,7 +838,7 @@ def run_cycle(
     now = datetime.now()
     state = load_pilot_state(state_path, now)
 
-    strategy = ETHCashRegimeStrategy(params=strategy_params_for_profile(args.profile))
+    strategy = build_strategy_for_profile(args.profile)
     if args.candle_count < strategy.warmup_period() + 5:
         raise ValueError("candle-count가 전략 warmup보다 작습니다.")
 
