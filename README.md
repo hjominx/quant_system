@@ -162,3 +162,13 @@ python scripts/run_discord_query_bot.py --no-file-log
 ```
 
 지원 명령: `!q status`, `!q price`, `!q assets`, `!q orders`, `!q help`
+
+버튼형 운영 패널을 쓰려면 `discord.py`를 설치하고 Bot Token, Channel ID, 관리자 Discord user ID를 `.env`에 추가한 뒤 컨트롤 봇을 실행합니다.
+
+```bash
+pip install -r requirements.txt
+python scripts/run_discord_control_bot.py --no-file-log
+```
+
+패널 기능: `Status`, `Price`, `Assets`, `Orders`, `Risk`, `Logs`, `Refresh Panel`, `Kill ON`, `Kill OFF`.
+조회 버튼은 계좌/주문 상태만 읽고, 킬스위치 버튼은 `DISCORD_ADMIN_USER_IDS`에 등록된 사용자만 실행할 수 있습니다.

@@ -149,6 +149,7 @@ class Config:
     discord_bot_token: Optional[str] = field(default=None, repr=False)
     discord_channel_id: Optional[str] = None
     discord_command_prefix: str = "!q"
+    discord_admin_user_ids: Optional[str] = field(default=None, repr=False)
     
     # --- 로깅 ---
     log_level: str = "INFO"
@@ -231,6 +232,7 @@ API 키:           {self.mask_secret(self.bithumb_api_key)}
 텔레그램:         {'설정됨' if self.telegram_bot_token else '미설정'}
 디스코드:         {'설정됨' if self.discord_webhook_url else '미설정'}
 디스코드 조회봇:   {'설정됨' if self.discord_bot_token and self.discord_channel_id else '미설정'}
+디스코드 관리자:   {'설정됨' if self.discord_admin_user_ids else '미설정'}
 
 [로깅]
 레벨:             {self.log_level}
@@ -294,6 +296,7 @@ def get_config(env_file: Optional[Path] = None, force_reload: bool = False) -> C
         discord_bot_token=_get_env("DISCORD_BOT_TOKEN", secret=True),
         discord_channel_id=_get_env("DISCORD_CHANNEL_ID"),
         discord_command_prefix=_get_env("DISCORD_COMMAND_PREFIX", default="!q") or "!q",
+        discord_admin_user_ids=_get_env("DISCORD_ADMIN_USER_IDS", secret=True),
         log_level=_get_env("LOG_LEVEL", default="INFO"),
     )
     
