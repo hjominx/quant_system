@@ -476,6 +476,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-spread-pct", type=parse_decimal, default=Decimal("0.005"))
     parser.add_argument("--loop", action="store_true", help="Keep running guarded decision cycles.")
     parser.add_argument("--interval-minutes", type=int, default=60)
+    parser.add_argument(
+        "--align-interval-to-clock",
+        action="store_true",
+        help="Sleep to the next wall-clock interval boundary, e.g. 00/15/30/45.",
+    )
     parser.add_argument("--cooldown-minutes", type=int, default=240)
     parser.add_argument("--max-orders-per-day", type=int, default=4)
     parser.add_argument(
@@ -483,6 +488,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="Send Discord price/account/order status every N minutes. 0 disables.",
+    )
+    parser.add_argument(
+        "--status-alert-on-hour",
+        action="store_true",
+        help="Only send scheduled status alerts on wall-clock interval boundaries.",
     )
     parser.add_argument(
         "--state-file",
@@ -516,12 +526,19 @@ def validate_runner_args(args: argparse.Namespace) -> None:
         raise ValueError("daily profile은 --timeframe 1d와 함께 사용해야 합니다.")
     if args.interval_minutes <= 0:
         raise ValueError("--interval-minutes는 1 이상이어야 합니다.")
+    if args.align_interval_to_clock and 1440 % args.interval_minutes != 0:
+        raise ValueError("--align-interval-to-clock은 하루를 나누는 interval에서만 사용하세요.")
     if args.cooldown_minutes < 0:
         raise ValueError("--cooldown-minutes는 0 이상이어야 합니다.")
     if args.max_orders_per_day <= 0:
         raise ValueError("--max-orders-per-day는 1 이상이어야 합니다.")
     if args.status_alert_interval_minutes < 0:
         raise ValueError("--status-alert-interval-minutes는 0 이상이어야 합니다.")
+    if args.status_alert_on_hour:
+        if args.status_alert_interval_minutes <= 0:
+            raise ValueError("--status-alert-on-hour는 status interval이 필요합니다.")
+        if 1440 % args.status_alert_interval_minutes != 0:
+            raise ValueError("--status-alert-on-hour interval은 하루를 나누는 값이어야 합니다.")
 
 
 def print_banner(args: argparse.Namespace, dry_run: bool) -> None:
@@ -542,7 +559,9 @@ def print_banner(args: argparse.Namespace, dry_run: bool) -> None:
         f"loop={args.loop} interval={args.interval_minutes}m "
         f"cooldown={args.cooldown_minutes}m max_orders/day={args.max_orders_per_day}"
     )
-    print(f"discord_status_interval={args.status_alert_interval_minutes}m")
+    clock_mode = " clock" if args.status_alert_on_hour else ""
+    print(f"discord_status_interval={args.status_alert_interval_minutes}m{clock_mode}")
+    print(f"sleep_mode={'clock-aligned' if args.align_interval_to_clock else 'fixed'}")
     print(f"risk_state={args.risk_state_file} kill_switch={args.kill_switch_file}")
 
 
@@ -636,6 +655,62 @@ def status_alert_due(state: PilotState, now: datetime, interval_minutes: int) ->
     return now - last_sent >= timedelta(minutes=interval_minutes)
 
 
+def clock_status_alert_due(
+    state: PilotState,
+    now: datetime,
+    interval_minutes: int,
+) -> bool:
+    """Return True only on wall-clock status boundaries.
+
+    For interval=60 this means one alert per hour, on the cycle that starts in
+    minute 00. A restart during the same hour will not duplicate the alert.
+    """
+    if interval_minutes <= 0:
+        return False
+    minutes_since_midnight = now.hour * 60 + now.minute
+    if minutes_since_midnight % interval_minutes != 0:
+        return False
+
+    boundary = now.replace(second=0, microsecond=0)
+    if not state.last_status_alert_at:
+        return True
+
+    last_sent = datetime.fromisoformat(state.last_status_alert_at)
+    return last_sent < boundary
+
+
+def calculate_sleep_seconds(
+    *,
+    now: datetime,
+    interval_minutes: int,
+    align_to_clock: bool,
+) -> int:
+    """Calculate loop sleep seconds, optionally to the next clock boundary."""
+    if not align_to_clock:
+        return interval_minutes * 60
+
+    interval_seconds = interval_minutes * 60
+    seconds_since_midnight = (
+        now.hour * 3600 +
+        now.minute * 60 +
+        now.second
+    )
+    next_boundary = (
+        (seconds_since_midnight // interval_seconds) + 1
+    ) * interval_seconds
+    if next_boundary > 24 * 3600:
+        next_boundary = 24 * 3600
+    return max(next_boundary - seconds_since_midnight, 1)
+
+
+def format_sleep_wait(seconds: int) -> str:
+    """Format loop sleep duration for logs."""
+    minutes = seconds / 60
+    if minutes.is_integer():
+        return f"{int(minutes)}분"
+    return f"{minutes:.1f}분"
+
+
 def build_risk_summary(risk_report, risk_limits: RiskLimits) -> str:
     """Format risk state into one Discord field."""
     return (
@@ -663,7 +738,15 @@ def send_status_alert_if_due(
     """Send scheduled Discord price/account/order status without blocking trading."""
     if not notifier.enabled:
         return state
-    if not status_alert_due(state, now, args.status_alert_interval_minutes):
+    if args.status_alert_on_hour:
+        due = clock_status_alert_due(
+            state,
+            now,
+            args.status_alert_interval_minutes,
+        )
+    else:
+        due = status_alert_due(state, now, args.status_alert_interval_minutes)
+    if not due:
         return state
 
     try:
@@ -687,7 +770,11 @@ def send_status_alert_if_due(
         notifier.send(
             embeds=build_snapshot_embeds(
                 snapshot,
-                title_prefix="30m LIVE status",
+                title_prefix=(
+                    "Hourly LIVE status"
+                    if args.status_alert_on_hour
+                    else f"{args.status_alert_interval_minutes}m LIVE status"
+                ),
                 orders_today=state.orders_today,
                 max_orders_per_day=args.max_orders_per_day,
                 signal=decision.signal.name,
@@ -697,7 +784,10 @@ def send_status_alert_if_due(
                 timestamp=now,
             )
         )
-        print("\nDiscord 30분 상태 알림 전송 완료")
+        if args.status_alert_on_hour:
+            print("\nDiscord 정각 상태 알림 전송 완료")
+        else:
+            print(f"\nDiscord {args.status_alert_interval_minutes}분 상태 알림 전송 완료")
         return record_status_alert(state, now)
     except Exception as exc:
         print(f"\n[알림 오류] Discord 상태 알림 실패: {type(exc).__name__}")
@@ -924,8 +1014,12 @@ def main() -> None:
             if not args.loop:
                 return
 
-            sleep_seconds = args.interval_minutes * 60
-            print(f"\n다음 판단까지 {args.interval_minutes}분 대기...")
+            sleep_seconds = calculate_sleep_seconds(
+                now=datetime.now(),
+                interval_minutes=args.interval_minutes,
+                align_to_clock=args.align_interval_to_clock,
+            )
+            print(f"\n다음 판단까지 {format_sleep_wait(sleep_seconds)} 대기...")
             time.sleep(sleep_seconds)
     finally:
         client.close()

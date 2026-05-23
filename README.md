@@ -143,7 +143,7 @@ Discord 서버에서 알림 채널을 만든 뒤 Server Settings → Integration
 - LIVE 주문 요청 성공 시 주문 방향, 마켓, 금액/수량, 계좌 평가액, 주문 UUID 알림
 - 위험 게이트 차단 시 차단 사유와 계좌 평가액 알림
 - 러너 오류 발생 시 에러 타입과 메시지 알림
-- `--status-alert-interval-minutes 30`을 붙이면 시세, 자산, 최근 체결/취소/미체결 주문 요약을 30분마다 알림
+- `--status-alert-interval-minutes 60 --status-alert-on-hour --align-interval-to-clock`을 붙이면 시세, 자산, 최근 체결/취소/미체결 주문 요약을 매시간 정각에 알림
 - dry-run 알림은 기본 비활성화이며 `--notify-dry-run`을 붙였을 때만 전송
 
 수동으로 Discord 조회 리포트를 보내려면:

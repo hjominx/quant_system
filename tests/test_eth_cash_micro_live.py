@@ -31,7 +31,10 @@ from scripts.run_eth_cash_micro_live import (
     assert_spread_ok,
     build_pilot_plan,
     calculate_buy_amount,
+    calculate_sleep_seconds,
     calculate_sell_volume,
+    clock_status_alert_due,
+    format_sleep_wait,
     record_order,
     record_status_alert,
     status_alert_due,
@@ -483,6 +486,36 @@ def test_status_alert_interval_state():
     print("  ✓ 상태 알림 주기와 주문 카운터 보존 정상")
 
 
+def test_hourly_status_alert_and_clock_aligned_sleep():
+    print("\n[테스트 16] 정각 상태 알림과 시계 정렬 대기")
+    print("-" * 60)
+
+    state = PilotState(date="2026-05-23", orders_today=0)
+    before_hour = datetime(2026, 5, 23, 9, 45, 0)
+    on_hour = datetime(2026, 5, 23, 10, 0, 4)
+    same_hour = record_status_alert(state, on_hour)
+
+    assert clock_status_alert_due(state, before_hour, 60) is False
+    assert clock_status_alert_due(state, on_hour, 60) is True
+    assert clock_status_alert_due(same_hour, on_hour.replace(second=50), 60) is False
+    assert clock_status_alert_due(same_hour, datetime(2026, 5, 23, 11, 0, 1), 60) is True
+
+    assert calculate_sleep_seconds(
+        now=datetime(2026, 5, 23, 9, 20, 41),
+        interval_minutes=15,
+        align_to_clock=True,
+    ) == 559
+    assert calculate_sleep_seconds(
+        now=datetime(2026, 5, 23, 9, 20, 41),
+        interval_minutes=15,
+        align_to_clock=False,
+    ) == 900
+    assert format_sleep_wait(559) == "9.3분"
+
+    print("  ✓ 정각 알림은 00분 사이클에서만 발생")
+    print("  ✓ 15분 루프가 다음 00/15/30/45분 경계로 정렬됨")
+
+
 def main():
     print("=" * 60)
     print("ETH/Cash Micro Live 안전 테스트")
@@ -505,6 +538,7 @@ def main():
         test_risk_state_round_trip,
         test_corrupt_risk_state_fails_closed,
         test_status_alert_interval_state,
+        test_hourly_status_alert_and_clock_aligned_sleep,
     ]
 
     passed = 0
