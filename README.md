@@ -170,5 +170,5 @@ pip install -r requirements.txt
 python scripts/run_discord_control_bot.py --no-file-log
 ```
 
-패널 기능: `Status`, `Price`, `Assets`, `Orders`, `Risk`, `Logs`, `Refresh Panel`, `Kill ON`, `Kill OFF`.
-조회 버튼은 계좌/주문 상태만 읽고, 킬스위치 버튼은 `DISCORD_ADMIN_USER_IDS`에 등록된 사용자만 실행할 수 있습니다.
+패널 기능: `Status`, `Price`, `Assets`, `Orders`, `Risk`, `Logs`, `Refresh Panel`, `Buy 5k`, `Buy 10k`, `Buy 25k`, `Sell ALL`, `Kill ON`, `Kill OFF`.
+조회 버튼은 계좌/주문 상태만 읽고, 수동매매/킬스위치 버튼은 `DISCORD_ADMIN_USER_IDS`에 등록된 사용자만 실행할 수 있습니다. 수동매매는 2단계 확인 후 LIVE 모드, 킬스위치, 미체결 주문, 스프레드, 리스크 게이트, 쿨다운/일일 한도, 포지션 한도를 모두 통과해야 실행됩니다.

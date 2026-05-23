@@ -3,8 +3,9 @@
 This is separate from webhook alerts. It uses a Discord bot token and button
 interactions to provide a small operations console for the live trader.
 
-The panel does not place market orders. Mutating controls are limited to the
-local kill switch file, and require DISCORD_ADMIN_USER_IDS.
+Manual market orders and kill switch controls require DISCORD_ADMIN_USER_IDS.
+Manual orders run through the same live risk, spread, cooldown, and quota gates
+as the automated runner.
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ import json
 import subprocess
 import sys
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -36,11 +37,27 @@ from notifications.discord_status import (
     format_krw,
     select_snapshot_embeds,
 )
+from notifications.discord_control_safety import (
+    calculate_manual_buy_amount,
+    parse_admin_user_ids,
+)
 from risk.live_guard import (
     RiskLimits,
+    assert_risk_allows_action,
     evaluate_risk,
     format_pct,
     load_risk_state,
+    save_risk_state,
+)
+from scripts.run_eth_cash_micro_live import (
+    VOLUME_QUANT,
+    assert_order_quota,
+    assert_spread_ok,
+    calculate_sell_volume,
+    load_pilot_state,
+    market_base_currency,
+    record_order,
+    save_pilot_state,
 )
 from utils.config import get_config
 from utils.logger import setup_logging
@@ -55,18 +72,6 @@ except ModuleNotFoundError as exc:  # pragma: no cover - exercised on VPS setup
 
 
 PANEL_TITLE = "Lo-Fi Quant Console"
-
-
-def parse_admin_user_ids(raw: Optional[str]) -> set[str]:
-    """Parse comma/space separated Discord user IDs."""
-    if not raw:
-        return set()
-    return {
-        chunk.strip()
-        for item in raw.split(",")
-        for chunk in item.split()
-        if chunk.strip()
-    }
 
 
 def load_panel_message_id(path: Path) -> Optional[int]:
@@ -107,16 +112,30 @@ class QuantControlController:
         order_limit: int,
         kill_switch_path: Path,
         risk_state_path: Path,
+        pilot_state_path: Path,
         service_name: str,
         admin_user_ids: set[str],
+        max_manual_order_krw: Decimal,
+        max_position_krw: Decimal,
+        min_order_krw: Decimal,
+        max_spread_pct: Decimal,
+        max_orders_per_day: int,
+        cooldown_minutes: int,
     ):
         self.config = config
         self.market = market
         self.order_limit = order_limit
         self.kill_switch_path = kill_switch_path
         self.risk_state_path = risk_state_path
+        self.pilot_state_path = pilot_state_path
         self.service_name = service_name
         self.admin_user_ids = admin_user_ids
+        self.max_manual_order_krw = max_manual_order_krw
+        self.max_position_krw = max_position_krw
+        self.min_order_krw = min_order_krw
+        self.max_spread_pct = max_spread_pct
+        self.max_orders_per_day = max_orders_per_day
+        self.cooldown_minutes = cooldown_minutes
         self.client = BithumbClient.from_config(
             config,
             dry_run=True,
@@ -207,19 +226,134 @@ class QuantControlController:
             title=PANEL_TITLE,
             description=(
                 "Button console for the ETH/Cash live trader. "
-                "조회 버튼은 상태를 읽고, 킬스위치는 관리자만 실행합니다."
+                "조회 버튼은 상태를 읽고, 킬스위치와 수동매매는 관리자만 실행합니다."
             ),
             color=color,
             fields=(
                 DiscordField("Market", self.market),
                 DiscordField("Live service", service_state),
                 DiscordField("Kill switch", kill_state),
+                DiscordField("Manual max", f"{format_krw(self.max_manual_order_krw)} KRW/order"),
                 DiscordField("Alerts", "Hourly status + order/risk/error webhooks"),
                 DiscordField("Admin gate", admin_state),
                 DiscordField("Updated", datetime.now().isoformat(timespec="minutes")),
             ),
         )
         return to_discord_embed(embed)
+
+    async def execute_manual_buy(self, amount: Decimal) -> discord.Embed:
+        """Execute one guarded manual market buy."""
+        async with self.lock:
+            return await asyncio.to_thread(self._execute_manual_buy_sync, amount)
+
+    async def execute_manual_sell_all(self) -> discord.Embed:
+        """Execute one guarded manual all-position market sell."""
+        async with self.lock:
+            return await asyncio.to_thread(self._execute_manual_sell_all_sync)
+
+    def _execute_manual_buy_sync(self, amount: Decimal) -> discord.Embed:
+        now = datetime.now()
+        with BithumbClient.from_config(
+            self.config,
+            dry_run=False,
+            allow_live_orders=self.config.is_live_trading,
+        ) as live_client:
+            self._assert_manual_trade_preflight(live_client, "BUY", now)
+            ticker = live_client.get_ticker(self.market)
+            balances = live_client.get_balances()
+            base = market_base_currency(self.market)
+            current_position_krw = balances.get_total(base) * ticker.trade_price
+            krw_amount = calculate_manual_buy_amount(
+                requested_amount=amount,
+                krw_balance=balances.krw_balance,
+                current_position_krw=current_position_krw,
+                max_position_krw=self.max_position_krw,
+                max_manual_order_krw=self.max_manual_order_krw,
+                min_order_krw=self.min_order_krw,
+            )
+            order = live_client.market_buy(self.market, krw_amount)
+            self._record_manual_order(now)
+            return build_manual_order_embed(
+                title="Manual BUY requested",
+                action="BUY",
+                amount=krw_amount,
+                volume=None,
+                order_uuid=order.uuid,
+                state=order.state.value,
+            )
+
+    def _execute_manual_sell_all_sync(self) -> discord.Embed:
+        now = datetime.now()
+        with BithumbClient.from_config(
+            self.config,
+            dry_run=False,
+            allow_live_orders=self.config.is_live_trading,
+        ) as live_client:
+            self._assert_manual_trade_preflight(live_client, "SELL", now)
+            ticker = live_client.get_ticker(self.market)
+            balances = live_client.get_balances()
+            base = market_base_currency(self.market)
+            volume = calculate_sell_volume(
+                coin_balance=balances.get_total(base),
+                trade_price=ticker.trade_price,
+                min_order_krw=self.min_order_krw,
+            )
+            if volume <= 0:
+                raise RuntimeError("매도 가능한 ETH 평가액이 최소 주문금액 미만입니다.")
+            order = live_client.market_sell(self.market, volume)
+            self._record_manual_order(now)
+            return build_manual_order_embed(
+                title="Manual SELL ALL requested",
+                action="SELL",
+                amount=None,
+                volume=volume,
+                order_uuid=order.uuid,
+                state=order.state.value,
+            )
+
+    def _assert_manual_trade_preflight(
+        self,
+        live_client: BithumbClient,
+        action: str,
+        now: datetime,
+    ) -> None:
+        """Apply the same live safety gates before manual Discord orders."""
+        if not self.config.is_live_trading:
+            raise RuntimeError("TRADING_MODE=LIVE가 아니어서 수동매매를 차단합니다.")
+
+        open_orders = live_client.get_open_orders(self.market)
+        if open_orders:
+            raise RuntimeError(f"미체결 주문 {len(open_orders)}개가 있어 수동매매를 차단합니다.")
+
+        orderbook = live_client.get_orderbook(self.market)
+        assert_spread_ok(orderbook.spread_pct, self.max_spread_pct)
+
+        ticker = live_client.get_ticker(self.market)
+        balances = live_client.get_balances()
+        base = market_base_currency(self.market)
+        equity = balances.krw_balance + balances.get_total(base) * ticker.trade_price
+        risk_state = load_risk_state(self.risk_state_path, now, equity)
+        risk_report = evaluate_risk(
+            state=risk_state,
+            equity=equity,
+            limits=RiskLimits.from_config(self.config),
+            kill_switch_file_active=self.kill_switch_path.exists(),
+        )
+        save_risk_state(self.risk_state_path, risk_report.state)
+        assert_risk_allows_action(action, risk_report)
+
+        state = load_pilot_state(self.pilot_state_path, now)
+        assert_order_quota(
+            state=state,
+            now=now,
+            max_orders_per_day=self.max_orders_per_day,
+            cooldown_minutes=self.cooldown_minutes,
+        )
+
+    def _record_manual_order(self, now: datetime) -> None:
+        """Record manual orders in the live runner quota/cooldown state."""
+        state = load_pilot_state(self.pilot_state_path, now)
+        save_pilot_state(self.pilot_state_path, record_order(state, now))
 
     async def build_log_embed(self) -> discord.Embed:
         """Build a compact journalctl tail embed."""
@@ -268,7 +402,7 @@ class ControlPanelView(discord.ui.View):
             return True
         message = (
             "관리자 권한이 없습니다. `.env`의 `DISCORD_ADMIN_USER_IDS`에 "
-            f"`{interaction.user.id}`를 추가해야 킬스위치 버튼을 쓸 수 있습니다."
+            f"`{interaction.user.id}`를 추가해야 킬스위치/수동매매 버튼을 쓸 수 있습니다."
         )
         if interaction.response.is_done():
             await interaction.followup.send(message, ephemeral=True)
@@ -325,7 +459,47 @@ class ControlPanelView(discord.ui.View):
         )
         await interaction.followup.send("패널을 새로고침했습니다.", ephemeral=True)
 
-    @discord.ui.button(label="Kill ON", style=discord.ButtonStyle.danger, custom_id="quant:kill:on", row=2)
+    @discord.ui.button(label="Buy 5k", style=discord.ButtonStyle.success, custom_id="quant:manual:buy:5000", row=2)
+    async def buy_5k_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._request_manual_trade(interaction, action="BUY", amount=Decimal("5000"))
+
+    @discord.ui.button(label="Buy 10k", style=discord.ButtonStyle.success, custom_id="quant:manual:buy:10000", row=2)
+    async def buy_10k_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._request_manual_trade(interaction, action="BUY", amount=Decimal("10000"))
+
+    @discord.ui.button(label="Buy 25k", style=discord.ButtonStyle.success, custom_id="quant:manual:buy:25000", row=2)
+    async def buy_25k_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._request_manual_trade(interaction, action="BUY", amount=Decimal("25000"))
+
+    @discord.ui.button(label="Sell ALL", style=discord.ButtonStyle.danger, custom_id="quant:manual:sell:all", row=2)
+    async def sell_all_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._request_manual_trade(interaction, action="SELL", amount=None)
+
+    async def _request_manual_trade(
+        self,
+        interaction: discord.Interaction,
+        *,
+        action: str,
+        amount: Optional[Decimal],
+    ) -> None:
+        if not await self._require_admin(interaction):
+            return
+        if action == "BUY":
+            description = f"{format_krw(amount or Decimal('0'))} KRW 시장가 매수를 요청할까요?"
+        else:
+            description = "보유 ETH 전체 시장가 매도를 요청할까요?"
+        await interaction.response.send_message(
+            description,
+            view=ConfirmManualTradeView(
+                self.controller,
+                action=action,
+                amount=amount,
+                panel_message=interaction.message,
+            ),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Kill ON", style=discord.ButtonStyle.danger, custom_id="quant:kill:on", row=3)
     async def kill_on_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not await self._require_admin(interaction):
             return
@@ -339,7 +513,7 @@ class ControlPanelView(discord.ui.View):
             view=self,
         )
 
-    @discord.ui.button(label="Kill OFF", style=discord.ButtonStyle.success, custom_id="quant:kill:off", row=2)
+    @discord.ui.button(label="Kill OFF", style=discord.ButtonStyle.success, custom_id="quant:kill:off", row=3)
     async def kill_off_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not await self._require_admin(interaction):
             return
@@ -348,6 +522,63 @@ class ControlPanelView(discord.ui.View):
             view=ConfirmKillSwitchOffView(self.controller, interaction.message),
             ephemeral=True,
         )
+
+
+class ConfirmManualTradeView(discord.ui.View):
+    """Two-step confirmation before manual market orders."""
+
+    def __init__(
+        self,
+        controller: QuantControlController,
+        *,
+        action: str,
+        amount: Optional[Decimal],
+        panel_message: discord.Message,
+    ):
+        super().__init__(timeout=30)
+        self.controller = controller
+        self.action = action
+        self.amount = amount
+        self.panel_message = panel_message
+        self.submitted = False
+
+    @discord.ui.button(label="Confirm Manual Trade", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not self.controller.is_admin(interaction.user.id):
+            await interaction.response.send_message("관리자 권한이 없습니다.", ephemeral=True)
+            return
+        if self.submitted:
+            await interaction.response.send_message("이미 처리 중인 수동매매 요청입니다.", ephemeral=True)
+            return
+        self.submitted = True
+        for item in self.children:
+            item.disabled = True
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        try:
+            if self.action == "BUY":
+                result_embed = await self.controller.execute_manual_buy(self.amount or Decimal("0"))
+            else:
+                result_embed = await self.controller.execute_manual_sell_all()
+            await interaction.followup.send(embed=result_embed, ephemeral=True)
+            await self.panel_message.edit(
+                embed=await self.controller.build_panel_embed(),
+                view=ControlPanelView(self.controller),
+            )
+        except Exception as exc:
+            self.submitted = False
+            await interaction.followup.send(
+                f"수동매매 차단/실패: `{type(exc).__name__}: {exc}`",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(content="수동매매를 취소했습니다.", view=None)
 
 
 class ConfirmKillSwitchOffView(discord.ui.View):
@@ -434,6 +665,40 @@ def _risk_block_summary(report) -> str:
     return ", ".join(blocks) if blocks else "none"
 
 
+def build_manual_order_embed(
+    *,
+    title: str,
+    action: str,
+    amount: Optional[Decimal],
+    volume: Optional[Decimal],
+    order_uuid: str,
+    state: str,
+) -> discord.Embed:
+    """Build an ephemeral manual order result embed."""
+    fields = [
+        DiscordField("Action", action),
+        DiscordField("State", state),
+        DiscordField("UUID", order_uuid, inline=False),
+    ]
+    if amount is not None:
+        fields.append(DiscordField("KRW Amount", f"{format_krw(amount)} KRW"))
+    if volume is not None:
+        fields.append(
+            DiscordField(
+                "Volume",
+                str(volume.quantize(VOLUME_QUANT, rounding=ROUND_DOWN)),
+            )
+        )
+    return to_discord_embed(
+        DiscordEmbed(
+            title=title,
+            description="Admin-only manual market order passed live safety gates.",
+            color=COLOR_WARNING,
+            fields=tuple(fields),
+        )
+    )
+
+
 def systemctl_state(service_name: str) -> str:
     """Return compact systemd service state."""
     result = subprocess.run(
@@ -467,8 +732,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--order-limit", type=int, default=5)
     parser.add_argument("--kill-switch-file", default="logs/KILL_SWITCH_ACTIVE")
     parser.add_argument("--risk-state-file", default="logs/eth_cash_micro_live_risk_state.json")
+    parser.add_argument("--pilot-state-file", default="logs/eth_cash_micro_live_state.json")
     parser.add_argument("--service-name", default="quant-eth-cash-live")
     parser.add_argument("--panel-state-file", default="logs/discord_control_panel_state.json")
+    parser.add_argument("--max-manual-order-krw", type=Decimal, default=Decimal("25000"))
+    parser.add_argument("--max-position-krw", type=Decimal, default=Decimal("150000"))
+    parser.add_argument("--min-order-krw", type=Decimal, default=Decimal("5000"))
+    parser.add_argument("--max-spread-pct", type=Decimal, default=Decimal("0.005"))
+    parser.add_argument("--max-orders-per-day", type=int, default=12)
+    parser.add_argument("--cooldown-minutes", type=int, default=60)
     parser.add_argument("--no-file-log", action="store_true")
     return parser.parse_args()
 
@@ -486,8 +758,15 @@ def main() -> None:
         order_limit=args.order_limit,
         kill_switch_path=Path(args.kill_switch_file),
         risk_state_path=Path(args.risk_state_file),
+        pilot_state_path=Path(args.pilot_state_file),
         service_name=args.service_name,
         admin_user_ids=parse_admin_user_ids(cfg.discord_admin_user_ids),
+        max_manual_order_krw=args.max_manual_order_krw,
+        max_position_krw=args.max_position_krw,
+        min_order_krw=args.min_order_krw,
+        max_spread_pct=args.max_spread_pct,
+        max_orders_per_day=args.max_orders_per_day,
+        cooldown_minutes=args.cooldown_minutes,
     )
     intents = discord.Intents.default()
     bot = QuantControlClient(
