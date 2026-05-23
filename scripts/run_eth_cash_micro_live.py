@@ -62,6 +62,7 @@ from risk.live_guard import (
 from strategies.base import Signal, StrategyContext, TradeDecision
 from strategies.eth_adaptive_alpha import ETHAdaptiveAlphaStrategy
 from strategies.eth_cash_regime import ETHCashRegimeStrategy
+from strategies.eth_micro_scalper import ETHMicroScalperStrategy
 from utils.config import Config, get_config
 from utils.logger import setup_logging
 
@@ -73,6 +74,18 @@ DEFAULT_CANDLE_COUNT = 200
 KRW_QUANT = Decimal("1")
 VOLUME_QUANT = Decimal("0.00000001")
 ADAPTIVE_ALPHA_PROFILES = {"stable_quality"}
+SCALP_PROFILES = {"scalp_active"}
+RUNTIME_PROFILE_CHOICES = {"stable_quality", "scalp_active"}
+PROFILE_DEFAULT_TIMEFRAMES = {
+    "daily": "1d",
+    "intraday4h": "4h",
+    "aggressive4h": "4h",
+    "stable_quality": "4h",
+    "scalp_active": "5m",
+}
+PROFILE_DEFAULT_CANDLE_COUNTS = {
+    "scalp_active": 200,
+}
 
 
 @dataclass(frozen=True)
@@ -92,6 +105,15 @@ class PilotState:
     orders_today: int = 0
     last_order_at: Optional[str] = None
     last_status_alert_at: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class RuntimeProfile:
+    """Runtime strategy mode resolved for one live cycle."""
+    profile: str
+    timeframe: str
+    candle_count: int
+    source: str
 
 
 def strategy_params_for_profile(profile: str) -> dict:
@@ -173,15 +195,114 @@ def strategy_params_for_profile(profile: str) -> dict:
             "breakout_tolerance": 0.030,
             "hard_stop_pct": 0.035,
         }
+    if profile == "scalp_active":
+        return {
+            "fast_ema": 5,
+            "slow_ema": 21,
+            "trend_ema": 55,
+            "momentum_window": 3,
+            "min_momentum": 0.0012,
+            "rsi_entry_min": 42,
+            "rsi_entry_max": 76,
+            "min_atr_pct": 0.00045,
+            "max_atr_pct": 0.018,
+            "periods_per_year": 365 * 24 * 12,
+            "max_realized_volatility": 2.80,
+            "target_volatility": 0.75,
+            "breakout_window": 18,
+            "breakout_tolerance": 0.0035,
+            "pullback_tolerance": 0.0060,
+            "min_volume_ratio": 0.70,
+            "take_profit_pct": 0.0060,
+            "stop_loss_pct": 0.0045,
+            "trailing_stop_pct": 0.0060,
+            "crash_3bar": -0.014,
+            "crash_6bar": -0.022,
+            "min_position": 0.25,
+            "max_position": 0.85,
+        }
     raise ValueError(f"지원하지 않는 profile: {profile}")
 
 
 def build_strategy_for_profile(profile: str):
     """Build the strategy implementation mapped to a live profile."""
     params = strategy_params_for_profile(profile)
+    if profile in SCALP_PROFILES:
+        return ETHMicroScalperStrategy(params=params)
     if profile in ADAPTIVE_ALPHA_PROFILES:
         return ETHAdaptiveAlphaStrategy(params=params)
     return ETHCashRegimeStrategy(params=params)
+
+
+def default_timeframe_for_profile(profile: str) -> str:
+    """Return the intended candle unit for a strategy profile."""
+    return PROFILE_DEFAULT_TIMEFRAMES.get(profile, DEFAULT_TIMEFRAME)
+
+
+def default_candle_count_for_profile(profile: str, fallback: int) -> int:
+    """Return a profile-specific candle count when one is required."""
+    return max(fallback, PROFILE_DEFAULT_CANDLE_COUNTS.get(profile, fallback))
+
+
+def validate_profile_timeframe(profile: str, timeframe: str) -> None:
+    """Validate profile/timeframe combinations."""
+    expected = default_timeframe_for_profile(profile)
+    if profile == "daily" and timeframe != "1d":
+        raise ValueError("daily profile은 --timeframe 1d와 함께 사용해야 합니다.")
+    if profile in ("intraday4h", "aggressive4h", "stable_quality") and timeframe != "4h":
+        raise ValueError(f"{profile} profile은 --timeframe 4h와 함께 사용해야 합니다.")
+    if profile == "scalp_active" and timeframe != expected:
+        raise ValueError(f"scalp_active profile은 --timeframe {expected}와 함께 사용해야 합니다.")
+
+
+def load_runtime_profile_mode(path: Path) -> Optional[str]:
+    """Load a Discord-switchable live profile from JSON or plain text."""
+    if not path.exists():
+        return None
+    raw_text = path.read_text(encoding="utf-8").strip()
+    if not raw_text:
+        return None
+    try:
+        raw = json.loads(raw_text)
+        profile = raw.get("profile")
+    except json.JSONDecodeError:
+        profile = raw_text
+    if profile not in RUNTIME_PROFILE_CHOICES:
+        raise ValueError(f"지원하지 않는 런타임 profile: {profile}")
+    return profile
+
+
+def save_runtime_profile_mode(path: Path, profile: str, *, updated_by: str = "local") -> None:
+    """Persist the Discord-switchable live profile."""
+    if profile not in RUNTIME_PROFILE_CHOICES:
+        raise ValueError(f"지원하지 않는 런타임 profile: {profile}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "profile": profile,
+        "timeframe": default_timeframe_for_profile(profile),
+        "updated_by": updated_by,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def resolve_runtime_profile(args: argparse.Namespace, profile_mode_path: Path) -> RuntimeProfile:
+    """Resolve the strategy/timeframe for the current cycle."""
+    profile = load_runtime_profile_mode(profile_mode_path)
+    source = str(profile_mode_path) if profile else "service args"
+    if profile is None:
+        profile = args.profile
+        timeframe = args.timeframe
+    else:
+        timeframe = default_timeframe_for_profile(profile)
+    validate_profile_timeframe(profile, timeframe)
+    candle_count = default_candle_count_for_profile(profile, args.candle_count)
+    return RuntimeProfile(
+        profile=profile,
+        timeframe=timeframe,
+        candle_count=candle_count,
+        source=source,
+    )
 
 
 def load_pilot_state(path: Path, now: datetime) -> PilotState:
@@ -492,10 +613,14 @@ def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Run one guarded ETH/Cash micro-live cycle.")
     parser.add_argument("--market", default=MARKET, help="KRW market. Default: KRW-ETH")
-    parser.add_argument("--timeframe", choices=["4h", "1d"], default=DEFAULT_TIMEFRAME)
+    parser.add_argument(
+        "--timeframe",
+        choices=["1m", "3m", "5m", "10m", "15m", "30m", "60m", "1h", "4h", "1d"],
+        default=DEFAULT_TIMEFRAME,
+    )
     parser.add_argument(
         "--profile",
-        choices=["intraday4h", "aggressive4h", "daily", "stable_quality"],
+        choices=["intraday4h", "aggressive4h", "daily", "stable_quality", "scalp_active"],
         default=DEFAULT_PROFILE,
     )
     parser.add_argument("--candle-count", type=int, default=DEFAULT_CANDLE_COUNT)
@@ -538,6 +663,11 @@ def parse_args() -> argparse.Namespace:
         default="logs/KILL_SWITCH_ACTIVE",
         help="If this file exists, all BUY/SELL orders are blocked.",
     )
+    parser.add_argument(
+        "--profile-mode-file",
+        default="logs/eth_cash_live_profile.json",
+        help="Optional runtime profile file. Discord can switch stable/scalp by writing here.",
+    )
     parser.add_argument("--live", action="store_true", help="Send real orders. Requires TRADING_MODE=LIVE.")
     parser.add_argument("--yes-i-understand-risk", action="store_true")
     parser.add_argument("--notify-dry-run", action="store_true", help="Send Discord alerts for dry-run orders/errors.")
@@ -549,10 +679,7 @@ def validate_runner_args(args: argparse.Namespace) -> None:
     """Validate runtime argument combinations."""
     if args.market != MARKET:
         raise ValueError("현재 파일럿은 ETH 전용입니다. --market KRW-ETH만 허용합니다.")
-    if args.profile in ("intraday4h", "aggressive4h", "stable_quality") and args.timeframe != "4h":
-        raise ValueError(f"{args.profile} profile은 --timeframe 4h와 함께 사용해야 합니다.")
-    if args.profile == "daily" and args.timeframe != "1d":
-        raise ValueError("daily profile은 --timeframe 1d와 함께 사용해야 합니다.")
+    validate_profile_timeframe(args.profile, args.timeframe)
     if args.interval_minutes <= 0:
         raise ValueError("--interval-minutes는 1 이상이어야 합니다.")
     if args.align_interval_to_clock and 1440 % args.interval_minutes != 0:
@@ -592,6 +719,7 @@ def print_banner(args: argparse.Namespace, dry_run: bool) -> None:
     print(f"discord_status_interval={args.status_alert_interval_minutes}m{clock_mode}")
     print(f"sleep_mode={'clock-aligned' if args.align_interval_to_clock else 'fixed'}")
     print(f"risk_state={args.risk_state_file} kill_switch={args.kill_switch_file}")
+    print(f"profile_mode_file={args.profile_mode_file}")
 
 
 def notify_safely(
@@ -837,9 +965,10 @@ def run_cycle(
     """Run one guarded decision cycle and optionally place one order."""
     now = datetime.now()
     state = load_pilot_state(state_path, now)
+    runtime_profile = resolve_runtime_profile(args, Path(args.profile_mode_file))
 
-    strategy = build_strategy_for_profile(args.profile)
-    if args.candle_count < strategy.warmup_period() + 5:
+    strategy = build_strategy_for_profile(runtime_profile.profile)
+    if runtime_profile.candle_count < strategy.warmup_period() + 5:
         raise ValueError("candle-count가 전략 warmup보다 작습니다.")
 
     if not client.health_check():
@@ -849,7 +978,11 @@ def run_cycle(
     if open_orders:
         raise RuntimeError(f"미체결 주문 {len(open_orders)}개 존재. 새 주문을 차단합니다.")
 
-    candles = client.get_candles(args.market, unit=args.timeframe, count=args.candle_count)
+    candles = client.get_candles(
+        args.market,
+        unit=runtime_profile.timeframe,
+        count=runtime_profile.candle_count,
+    )
     ohlcv = candles_to_ohlcv(candles)
     ticker = client.get_ticker(args.market)
     balances = client.get_balances()
@@ -891,6 +1024,11 @@ def run_cycle(
     coin_total = balances.get_total(base)
     coin_value = coin_total * ticker.trade_price
     print(f"\n[{now.isoformat(timespec='seconds')}]")
+    print("[프로필]")
+    print(
+        f"profile={runtime_profile.profile} timeframe={runtime_profile.timeframe} "
+        f"candles={runtime_profile.candle_count} source={runtime_profile.source}"
+    )
     print("[상태]")
     print(f"KRW 가용: {balances.krw_balance:,}")
     print(f"{base} 총량: {coin_total}")

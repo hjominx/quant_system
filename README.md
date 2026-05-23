@@ -125,13 +125,15 @@ ETH/Cash Regime은 2024년 말 이후 ETH 단순보유가 크게 흔들린 구�
 
 ## Micro Live 파일럿
 
-`scripts/run_eth_cash_micro_live.py`는 ETH/Cash Regime을 소액으로 반복 실행하는 파일럿 도구입니다.
+`scripts/run_eth_cash_micro_live.py`는 ETH/Cash 전략을 소액으로 반복 실행하는 파일럿 도구입니다.
 
 - 기본값은 dry-run이며 실제 주문을 보내지 않음
 - 실제 주문은 `.env`의 `TRADING_MODE=LIVE`, `--live`, `--yes-i-understand-risk`가 모두 있을 때만 가능
 - 최대 주문금액, 최대 ETH 평가금액, 최소 주문금액, 미체결 주문, 호가 스프레드 게이트를 강제
 - 기본 프로필은 4시간봉 `intraday4h`이며 `--loop`, `--interval-minutes`, `--cooldown-minutes`, `--max-orders-per-day`로 반복 주기를 제어
 - 더 공격적인 소액 실험은 `--profile aggressive4h`를 사용하며, RSI 저점 탐색 진입과 더 높은 ETH 목표 비중을 허용
+- `--profile stable_quality`는 4시간봉 방어형 적응 알파, `--profile scalp_active`는 5분봉 스캘핑 파일럿
+- Discord 컨트롤 봇은 `logs/eth_cash_live_profile.json`을 바꿔 Stable/Scalp 모드를 다음 사이클부터 전환
 - 계좌 위험 게이트가 일일 손실, 주간 손실, MDD, 킬스위치 파일(`logs/KILL_SWITCH_ACTIVE`)을 주문 직전에 강제
 - `DISCORD_WEBHOOK_URL`이 설정되어 있으면 LIVE 주문, 위험 차단, 러너 오류, 주기적 상태 리포트를 Discord로 알림
 - 시장가 매수는 KRW 금액만, 시장가 매도는 ETH 수량만 전송하는 빗썸 V2 비대칭 규칙 준수

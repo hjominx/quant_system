@@ -54,9 +54,12 @@ from scripts.run_eth_cash_micro_live import (
     assert_order_quota,
     assert_spread_ok,
     calculate_sell_volume,
+    default_timeframe_for_profile,
     load_pilot_state,
+    load_runtime_profile_mode,
     market_base_currency,
     record_order,
+    save_runtime_profile_mode,
     save_pilot_state,
 )
 from utils.config import get_config
@@ -113,6 +116,7 @@ class QuantControlController:
         kill_switch_path: Path,
         risk_state_path: Path,
         pilot_state_path: Path,
+        profile_mode_path: Path,
         service_name: str,
         admin_user_ids: set[str],
         max_manual_order_krw: Decimal,
@@ -128,6 +132,7 @@ class QuantControlController:
         self.kill_switch_path = kill_switch_path
         self.risk_state_path = risk_state_path
         self.pilot_state_path = pilot_state_path
+        self.profile_mode_path = profile_mode_path
         self.service_name = service_name
         self.admin_user_ids = admin_user_ids
         self.max_manual_order_krw = max_manual_order_krw
@@ -146,6 +151,14 @@ class QuantControlController:
     def is_admin(self, user_id: int) -> bool:
         """Return whether this Discord user can run mutating controls."""
         return str(user_id) in self.admin_user_ids
+
+    def current_profile_mode(self) -> str:
+        """Return the active runtime profile, falling back to stable mode."""
+        return load_runtime_profile_mode(self.profile_mode_path) or "stable_quality"
+
+    def set_profile_mode(self, profile: str, *, updated_by: str) -> None:
+        """Persist a runtime stable/scalp profile selection."""
+        save_runtime_profile_mode(self.profile_mode_path, profile, updated_by=updated_by)
 
     async def collect_snapshot_embeds(self, report: str) -> list[discord.Embed]:
         """Collect Bithumb account state and convert it to Discord embeds."""
@@ -216,6 +229,8 @@ class QuantControlController:
         """Build the public control panel embed."""
         service_state = await asyncio.to_thread(systemctl_state, self.service_name)
         kill_state = "ACTIVE" if self.kill_switch_path.exists() else "inactive"
+        profile = self.current_profile_mode()
+        timeframe = default_timeframe_for_profile(profile)
         color = COLOR_DANGER if self.kill_switch_path.exists() else COLOR_INFO
         admin_state = (
             f"{len(self.admin_user_ids)} admin id(s)"
@@ -231,6 +246,7 @@ class QuantControlController:
             color=color,
             fields=(
                 DiscordField("Market", self.market),
+                DiscordField("Mode", f"{profile} ({timeframe})"),
                 DiscordField("Live service", service_state),
                 DiscordField("Kill switch", kill_state),
                 DiscordField("Manual max", f"{format_krw(self.max_manual_order_krw)} KRW/order"),
@@ -523,6 +539,28 @@ class ControlPanelView(discord.ui.View):
             ephemeral=True,
         )
 
+    @discord.ui.button(label="Stable Mode", style=discord.ButtonStyle.secondary, custom_id="quant:mode:stable", row=4)
+    async def stable_mode_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._request_profile_mode(interaction, "stable_quality")
+
+    @discord.ui.button(label="Scalp Mode", style=discord.ButtonStyle.danger, custom_id="quant:mode:scalp", row=4)
+    async def scalp_mode_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._request_profile_mode(interaction, "scalp_active")
+
+    async def _request_profile_mode(self, interaction: discord.Interaction, profile: str) -> None:
+        if not await self._require_admin(interaction):
+            return
+        timeframe = default_timeframe_for_profile(profile)
+        await interaction.response.send_message(
+            f"`{profile}` ({timeframe}) 모드로 전환할까요? 다음 판단 사이클부터 적용됩니다.",
+            view=ConfirmProfileModeView(
+                self.controller,
+                profile=profile,
+                panel_message=interaction.message,
+            ),
+            ephemeral=True,
+        )
+
 
 class ConfirmManualTradeView(discord.ui.View):
     """Two-step confirmation before manual market orders."""
@@ -585,21 +623,86 @@ class ConfirmKillSwitchOffView(discord.ui.View):
     """Two-step confirmation before removing the kill switch."""
 
     def __init__(self, controller: QuantControlController, panel_message: discord.Message):
-        super().__init__(timeout=30)
+        super().__init__(timeout=120)
         self.controller = controller
         self.panel_message = panel_message
+        self.submitted = False
 
     @discord.ui.button(label="Confirm Kill OFF", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not self.controller.is_admin(interaction.user.id):
             await interaction.response.send_message("관리자 권한이 없습니다.", ephemeral=True)
             return
-        self.controller.disable_kill_switch()
-        await interaction.response.edit_message(content="킬스위치를 해제했습니다.", view=None)
-        await self.panel_message.edit(
-            embed=await self.controller.build_panel_embed(),
-            view=ControlPanelView(self.controller),
-        )
+        if self.submitted:
+            await interaction.response.send_message("이미 처리 중입니다.", ephemeral=True)
+            return
+        self.submitted = True
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            self.controller.disable_kill_switch()
+            await interaction.followup.send("킬스위치를 해제했습니다.", ephemeral=True)
+            await self.panel_message.edit(
+                embed=await self.controller.build_panel_embed(),
+                view=ControlPanelView(self.controller),
+            )
+        except Exception as exc:
+            self.submitted = False
+            await interaction.followup.send(
+                f"킬스위치 해제 실패: `{type(exc).__name__}: {exc}`",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(content="취소했습니다.", view=None)
+
+
+class ConfirmProfileModeView(discord.ui.View):
+    """Two-step confirmation before changing the live trading profile."""
+
+    def __init__(
+        self,
+        controller: QuantControlController,
+        *,
+        profile: str,
+        panel_message: discord.Message,
+    ):
+        super().__init__(timeout=60)
+        self.controller = controller
+        self.profile = profile
+        self.panel_message = panel_message
+        self.submitted = False
+
+    @discord.ui.button(label="Confirm Mode Switch", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not self.controller.is_admin(interaction.user.id):
+            await interaction.response.send_message("관리자 권한이 없습니다.", ephemeral=True)
+            return
+        if self.submitted:
+            await interaction.response.send_message("이미 처리 중입니다.", ephemeral=True)
+            return
+        self.submitted = True
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            self.controller.set_profile_mode(
+                self.profile,
+                updated_by=str(interaction.user.id),
+            )
+            timeframe = default_timeframe_for_profile(self.profile)
+            await interaction.followup.send(
+                f"`{self.profile}` ({timeframe}) 모드로 전환했습니다. 다음 판단 사이클부터 적용됩니다.",
+                ephemeral=True,
+            )
+            await self.panel_message.edit(
+                embed=await self.controller.build_panel_embed(),
+                view=ControlPanelView(self.controller),
+            )
+        except Exception as exc:
+            self.submitted = False
+            await interaction.followup.send(
+                f"모드 전환 실패: `{type(exc).__name__}: {exc}`",
+                ephemeral=True,
+            )
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -792,6 +895,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kill-switch-file", default="logs/KILL_SWITCH_ACTIVE")
     parser.add_argument("--risk-state-file", default="logs/eth_cash_micro_live_risk_state.json")
     parser.add_argument("--pilot-state-file", default="logs/eth_cash_micro_live_state.json")
+    parser.add_argument("--profile-mode-file", default="logs/eth_cash_live_profile.json")
     parser.add_argument("--service-name", default="quant-eth-cash-live")
     parser.add_argument("--panel-state-file", default="logs/discord_control_panel_state.json")
     parser.add_argument("--max-manual-order-krw", type=Decimal, default=Decimal("25000"))
@@ -828,6 +932,7 @@ def main() -> None:
         kill_switch_path=Path(args.kill_switch_file),
         risk_state_path=Path(args.risk_state_file),
         pilot_state_path=Path(args.pilot_state_file),
+        profile_mode_path=Path(args.profile_mode_file),
         service_name=args.service_name,
         admin_user_ids=parse_admin_user_ids(cfg.discord_admin_user_ids),
         max_manual_order_krw=args.max_manual_order_krw,

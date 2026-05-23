@@ -36,14 +36,18 @@ from scripts.run_eth_cash_micro_live import (
     calculate_sell_volume,
     clock_status_alert_due,
     format_sleep_wait,
+    load_runtime_profile_mode,
     record_order,
     record_status_alert,
+    resolve_runtime_profile,
+    save_runtime_profile_mode,
     status_alert_due,
     strategy_params_for_profile,
     validate_live_permission,
 )
 from strategies.base import Signal, TradeDecision
 from strategies.eth_adaptive_alpha import ETHAdaptiveAlphaStrategy
+from strategies.eth_micro_scalper import ETHMicroScalperStrategy
 
 
 class FakeConfig:
@@ -244,8 +248,55 @@ def test_stable_quality_profile_uses_adaptive_alpha():
     print("  ✓ 리서치 프리셋의 방어형 파라미터 적용")
 
 
+def test_scalp_active_profile_uses_micro_scalper():
+    print("\n[테스트 9] 스캘핑 프로필")
+    print("-" * 60)
+
+    strategy = build_strategy_for_profile("scalp_active")
+
+    assert isinstance(strategy, ETHMicroScalperStrategy)
+    assert strategy.params["periods_per_year"] == 365 * 24 * 12
+    assert strategy.params["take_profit_pct"] == 0.0060
+    assert strategy.params["stop_loss_pct"] == 0.0045
+    assert strategy.params["max_position"] == 0.85
+
+    print("  ✓ scalp_active가 ETHMicroScalperStrategy로 연결됨")
+    print("  ✓ 5분봉 스캘핑 파라미터 적용")
+
+
+def test_runtime_profile_mode_file_switches_stable_and_scalp():
+    print("\n[테스트 10] 런타임 프로필 파일")
+    print("-" * 60)
+
+    class Args:
+        profile = "stable_quality"
+        timeframe = "4h"
+        candle_count = 200
+
+    with TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "profile.json"
+        fallback = resolve_runtime_profile(Args, path)
+        assert fallback.profile == "stable_quality"
+        assert fallback.timeframe == "4h"
+        assert fallback.source == "service args"
+
+        save_runtime_profile_mode(path, "scalp_active", updated_by="test")
+        assert load_runtime_profile_mode(path) == "scalp_active"
+        scalp = resolve_runtime_profile(Args, path)
+        assert scalp.profile == "scalp_active"
+        assert scalp.timeframe == "5m"
+        assert scalp.candle_count == 200
+
+        save_runtime_profile_mode(path, "stable_quality", updated_by="test")
+        stable = resolve_runtime_profile(Args, path)
+        assert stable.profile == "stable_quality"
+        assert stable.timeframe == "4h"
+
+    print("  ✓ Discord 모드 파일로 stable/scalp 전환 가능")
+
+
 def test_order_quota_blocks_cooldown_and_daily_limit():
-    print("\n[테스트 9] 주문 쿨다운/일일 한도")
+    print("\n[테스트 11] 주문 쿨다운/일일 한도")
     print("-" * 60)
 
     now = datetime(2026, 5, 22, 9, 0, 0)
@@ -548,6 +599,8 @@ def main():
         test_intraday_profile_uses_4h_volatility_scaling,
         test_aggressive_profile_allows_dip_probe,
         test_stable_quality_profile_uses_adaptive_alpha,
+        test_scalp_active_profile_uses_micro_scalper,
+        test_runtime_profile_mode_file_switches_stable_and_scalp,
         test_order_quota_blocks_cooldown_and_daily_limit,
         test_risk_state_initializes_and_rolls_periods,
         test_daily_loss_blocks_buy_but_allows_sell,
