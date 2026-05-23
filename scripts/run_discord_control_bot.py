@@ -290,7 +290,7 @@ class QuantControlController:
                 min_order_krw=self.min_order_krw,
             )
             order = live_client.market_buy(self.market, krw_amount)
-            self._record_manual_order(now)
+            self._record_manual_order(now, action="BUY")
             return build_manual_order_embed(
                 title="Manual BUY requested",
                 action="BUY",
@@ -319,7 +319,7 @@ class QuantControlController:
             if volume <= 0:
                 raise RuntimeError("매도 가능한 ETH 평가액이 최소 주문금액 미만입니다.")
             order = live_client.market_sell(self.market, volume)
-            self._record_manual_order(now)
+            self._record_manual_order(now, action="SELL")
             return build_manual_order_embed(
                 title="Manual SELL ALL requested",
                 action="SELL",
@@ -369,10 +369,10 @@ class QuantControlController:
             cooldown_seconds=self.cooldown_seconds,
         )
 
-    def _record_manual_order(self, now: datetime) -> None:
+    def _record_manual_order(self, now: datetime, *, action: str) -> None:
         """Record manual orders in the live runner quota/cooldown state."""
         state = load_pilot_state(self.pilot_state_path, now)
-        save_pilot_state(self.pilot_state_path, record_order(state, now))
+        save_pilot_state(self.pilot_state_path, record_order(state, now, action=action))
 
     async def build_log_embed(self) -> discord.Embed:
         """Build a compact journalctl tail embed."""

@@ -398,6 +398,42 @@ def test_order_quota_supports_second_cooldown():
     print("  ✓ 10초 쿨다운 적용")
 
 
+def test_record_order_tracks_averaging_count():
+    print("\n[테스트 14] 추매 카운트 저장")
+    print("-" * 60)
+
+    now = datetime(2026, 5, 22, 9, 0, 0)
+    state = PilotState(date=now.date().isoformat())
+
+    entry = record_order(state, now, action="BUY")
+    assert entry.averaging_count == 0
+
+    first_add = record_order(
+        entry,
+        now + timedelta(minutes=1),
+        action="BUY",
+        is_averaging=True,
+    )
+    assert first_add.averaging_count == 1
+
+    second_add = record_order(
+        first_add,
+        now + timedelta(minutes=2),
+        action="BUY",
+        is_averaging=True,
+    )
+    assert second_add.averaging_count == 2
+
+    exit_state = record_order(
+        second_add,
+        now + timedelta(minutes=3),
+        action="SELL",
+    )
+    assert exit_state.averaging_count == 0
+
+    print("  ✓ 일반 매수는 유지, 추매는 증가, 매도는 리셋")
+
+
 def test_risk_state_initializes_and_rolls_periods():
     print("\n[테스트 8] 위험 상태 기준값 초기화/리셋")
     print("-" * 60)
@@ -661,6 +697,7 @@ def main():
         test_runtime_profile_mode_file_switches_stable_and_scalp,
         test_order_quota_blocks_cooldown_and_daily_limit,
         test_order_quota_supports_second_cooldown,
+        test_record_order_tracks_averaging_count,
         test_risk_state_initializes_and_rolls_periods,
         test_daily_loss_blocks_buy_but_allows_sell,
         test_weekly_loss_blocks_buy,

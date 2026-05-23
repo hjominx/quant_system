@@ -73,6 +73,15 @@ class ETHMicroScalperStrategy(BaseStrategy):
         params.setdefault("crash_6bar", -0.022)
         params.setdefault("min_position", 0.25)
         params.setdefault("max_position", 0.85)
+        params.setdefault("averaging_enabled", False)
+        params.setdefault("averaging_max_adds", 2)
+        params.setdefault("averaging_min_loss_pct", 0.0040)
+        params.setdefault("averaging_max_loss_pct", 0.0140)
+        params.setdefault("averaging_step_weight", 0.15)
+        params.setdefault("averaging_rsi_min", 30)
+        params.setdefault("averaging_rsi_max", 58)
+        params.setdefault("averaging_momentum_floor", -0.0025)
+        params.setdefault("averaging_trend_floor", 0.994)
         params.setdefault("required_history_days", max(
             params["trend_ema"],
             params["momentum_window"],
@@ -102,6 +111,12 @@ class ETHMicroScalperStrategy(BaseStrategy):
         assert 0 < self.params["take_profit_pct"] < 1
         assert 0 < self.params["trailing_stop_pct"] < 1
         assert 0 < self.params["min_position"] <= self.params["max_position"] <= 1
+        assert self.params["averaging_min_loss_pct"] > 0
+        assert self.params["averaging_max_adds"] >= 0
+        assert self.params["averaging_max_loss_pct"] >= self.params["averaging_min_loss_pct"]
+        assert self.params["averaging_step_weight"] > 0
+        assert self.params["averaging_rsi_min"] < self.params["averaging_rsi_max"]
+        assert self.params["averaging_trend_floor"] > 0
 
     def generate_signal(self, ctx: StrategyContext) -> TradeDecision:
         if len(ctx.ohlcv) < self.warmup_period():
@@ -121,12 +136,35 @@ class ETHMicroScalperStrategy(BaseStrategy):
                 self.peak_close > 0 and
                 snapshot.close < self.peak_close * (1 - self.params["trailing_stop_pct"])
             )
+            if take_profit or trailing_exit or snapshot.crash_risk:
+                return TradeDecision(
+                    signal=Signal.SELL,
+                    target_weight=0.0,
+                    reason=f"ETH scalp exit pnl={pnl:.3%} | {reason}",
+                    confidence=1.0,
+                    stop_loss_pct=-self.params["stop_loss_pct"],
+                    take_profit_pct=self.params["take_profit_pct"],
+                )
+            averaging_target = self._averaging_target_weight(ctx, snapshot, pnl)
+            if averaging_target is not None:
+                current_weight = self._current_weight(ctx, snapshot.close)
+                return TradeDecision(
+                    signal=Signal.BUY,
+                    target_weight=averaging_target,
+                    reason=(
+                        f"ETH scalp controlled averaging pnl={pnl:.3%}, "
+                        f"weight={current_weight:.2f}->{averaging_target:.2f} | {reason}"
+                    ),
+                    confidence=0.58,
+                    stop_loss_pct=-self.params["stop_loss_pct"],
+                    take_profit_pct=self.params["take_profit_pct"],
+                )
             trend_exit = (
                 snapshot.close < snapshot.ema_slow or
                 snapshot.ema_fast < snapshot.ema_slow or
                 snapshot.rsi < self.params["rsi_exit"]
             )
-            if take_profit or stop_loss or trailing_exit or trend_exit or snapshot.crash_risk:
+            if stop_loss or trend_exit:
                 return TradeDecision(
                     signal=Signal.SELL,
                     target_weight=0.0,
@@ -246,6 +284,49 @@ class ETHMicroScalperStrategy(BaseStrategy):
             return 0.0
         raw = self.params["target_volatility"] / realized_volatility
         return float(np.clip(raw, self.params["min_position"], self.params["max_position"]))
+
+    def _current_weight(self, ctx: StrategyContext, close: float) -> float:
+        if ctx.portfolio_value <= 0 or close <= 0:
+            return 0.0
+        return float(np.clip(ctx.current_position * close / ctx.portfolio_value, 0, 1))
+
+    def _averaging_target_weight(
+        self,
+        ctx: StrategyContext,
+        snapshot: ETHMicroScalpSnapshot,
+        pnl: float,
+    ) -> float | None:
+        if not self.params["averaging_enabled"]:
+            return None
+        if int(ctx.metadata.get("averaging_count", 0)) >= self.params["averaging_max_adds"]:
+            return None
+        if ctx.avg_buy_price <= 0 or ctx.portfolio_value <= 0:
+            return None
+        loss = -pnl
+        if loss < self.params["averaging_min_loss_pct"]:
+            return None
+        if loss > self.params["averaging_max_loss_pct"]:
+            return None
+        current_weight = self._current_weight(ctx, snapshot.close)
+        if current_weight >= self.params["max_position"]:
+            return None
+        trend_intact = snapshot.close >= snapshot.ema_trend * self.params["averaging_trend_floor"]
+        rsi_ok = self.params["averaging_rsi_min"] <= snapshot.rsi <= self.params["averaging_rsi_max"]
+        rebound_ok = (
+            snapshot.momentum >= self.params["averaging_momentum_floor"] or
+            snapshot.pullback_ready
+        )
+        if not (
+            trend_intact and
+            rsi_ok and
+            rebound_ok and
+            snapshot.volatility_ready and
+            not snapshot.crash_risk
+        ):
+            return None
+        target = current_weight + self.params["averaging_step_weight"]
+        target = max(target, self.params["min_position"])
+        return float(np.clip(target, 0, self.params["max_position"]))
 
     @staticmethod
     def _format_reason(snapshot: ETHMicroScalpSnapshot) -> str:

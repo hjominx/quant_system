@@ -16,6 +16,8 @@ Current pilot profile:
 - Cooldown: 10 seconds
 - Max orders per day: 300
 - Discord status: hourly, on the hour
+- Scalp modes allow controlled averaging up to 2 add-on buys per position,
+  then keep hard-stop behavior if the position does not recover.
 
 Install or refresh the service on AWS:
 

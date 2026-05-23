@@ -102,6 +102,74 @@ def test_scalper_exits_stop_loss():
     print("  ✓ stop-loss SELL")
 
 
+def test_scalper_controlled_averaging_before_hard_stop():
+    print("\n[테스트 4] 스캘퍼 제한 추매")
+    print("-" * 60)
+
+    strategy = ETHMicroScalperStrategy(params={
+        "averaging_enabled": True,
+        "averaging_max_adds": 2,
+        "averaging_min_loss_pct": 0.003,
+        "averaging_max_loss_pct": 0.020,
+        "averaging_step_weight": 0.20,
+        "averaging_rsi_min": 0,
+        "averaging_rsi_max": 100,
+        "averaging_momentum_floor": -1.0,
+        "averaging_trend_floor": 0.001,
+    })
+    ohlcv = make_scalp_ohlcv()
+    close = float(ohlcv["close"].iloc[-1])
+    current_position = 50_000 / close
+    decision = strategy.generate_signal(StrategyContext(
+        timestamp=ohlcv.index[-1],
+        ticker="KRW-ETH",
+        ohlcv=ohlcv,
+        current_position=current_position,
+        avg_buy_price=close * 1.005,
+        cash=150000,
+        portfolio_value=200000,
+        metadata={"averaging_count": 1},
+    ))
+
+    assert decision.signal == Signal.BUY
+    assert decision.target_weight > 0.25
+    assert "controlled averaging" in decision.reason
+
+    print(f"  ✓ averaging BUY target={decision.target_weight:.3f}")
+
+
+def test_scalper_stops_after_two_averaging_buys():
+    print("\n[테스트 5] 스캘퍼 추매 2회 제한")
+    print("-" * 60)
+
+    strategy = ETHMicroScalperStrategy(params={
+        "averaging_enabled": True,
+        "averaging_max_adds": 2,
+        "averaging_min_loss_pct": 0.003,
+        "averaging_max_loss_pct": 0.020,
+        "averaging_rsi_min": 0,
+        "averaging_rsi_max": 100,
+        "averaging_momentum_floor": -1.0,
+        "averaging_trend_floor": 0.001,
+    })
+    ohlcv = make_scalp_ohlcv()
+    close = float(ohlcv["close"].iloc[-1])
+    decision = strategy.generate_signal(StrategyContext(
+        timestamp=ohlcv.index[-1],
+        ticker="KRW-ETH",
+        ohlcv=ohlcv,
+        current_position=50_000 / close,
+        avg_buy_price=close * 1.005,
+        cash=150000,
+        portfolio_value=200000,
+        metadata={"averaging_count": 2},
+    ))
+
+    assert decision.signal == Signal.SELL
+
+    print("  ✓ max averaging reached -> hard stop SELL")
+
+
 def main():
     print("=" * 60)
     print("ETH Micro Scalper 테스트")
@@ -110,6 +178,8 @@ def main():
         test_scalper_buys_textured_uptrend,
         test_scalper_exits_take_profit,
         test_scalper_exits_stop_loss,
+        test_scalper_controlled_averaging_before_hard_stop,
+        test_scalper_stops_after_two_averaging_buys,
     ]
     passed = 0
     failed = 0

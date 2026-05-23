@@ -107,6 +107,7 @@ class PilotState:
     orders_today: int = 0
     last_order_at: Optional[str] = None
     last_status_alert_at: Optional[str] = None
+    averaging_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -222,6 +223,15 @@ def strategy_params_for_profile(profile: str) -> dict:
             "crash_6bar": -0.022,
             "min_position": 0.25,
             "max_position": 0.85,
+            "averaging_enabled": True,
+            "averaging_max_adds": 2,
+            "averaging_min_loss_pct": 0.0040,
+            "averaging_max_loss_pct": 0.0140,
+            "averaging_step_weight": 0.15,
+            "averaging_rsi_min": 30,
+            "averaging_rsi_max": 58,
+            "averaging_momentum_floor": -0.0025,
+            "averaging_trend_floor": 0.994,
         }
     if profile == "scalp_1m":
         return {
@@ -252,6 +262,15 @@ def strategy_params_for_profile(profile: str) -> dict:
             "crash_6bar": -0.014,
             "min_position": 0.25,
             "max_position": 0.85,
+            "averaging_enabled": True,
+            "averaging_max_adds": 2,
+            "averaging_min_loss_pct": 0.0025,
+            "averaging_max_loss_pct": 0.0100,
+            "averaging_step_weight": 0.20,
+            "averaging_rsi_min": 28,
+            "averaging_rsi_max": 58,
+            "averaging_momentum_floor": -0.0025,
+            "averaging_trend_floor": 0.993,
         }
     raise ValueError(f"지원하지 않는 profile: {profile}")
 
@@ -349,6 +368,7 @@ def load_pilot_state(path: Path, now: datetime) -> PilotState:
         orders_today=int(raw.get("orders_today", 0)),
         last_order_at=raw.get("last_order_at"),
         last_status_alert_at=raw.get("last_status_alert_at"),
+        averaging_count=int(raw.get("averaging_count", 0)),
     )
     if state.date != today:
         return PilotState(date=today)
@@ -365,6 +385,7 @@ def save_pilot_state(path: Path, state: PilotState) -> None:
                 "orders_today": state.orders_today,
                 "last_order_at": state.last_order_at,
                 "last_status_alert_at": state.last_status_alert_at,
+                "averaging_count": state.averaging_count,
             },
             f,
             ensure_ascii=False,
@@ -401,15 +422,27 @@ def assert_order_quota(
         )
 
 
-def record_order(state: PilotState, now: datetime) -> PilotState:
+def record_order(
+    state: PilotState,
+    now: datetime,
+    *,
+    action: Optional[str] = None,
+    is_averaging: bool = False,
+) -> PilotState:
     """Return state after one accepted order."""
     today = now.date().isoformat()
     orders_today = state.orders_today if state.date == today else 0
+    averaging_count = state.averaging_count if state.date == today else 0
+    if action == "SELL":
+        averaging_count = 0
+    elif action == "BUY" and is_averaging:
+        averaging_count += 1
     return PilotState(
         date=today,
         orders_today=orders_today + 1,
         last_order_at=now.isoformat(timespec="seconds"),
         last_status_alert_at=state.last_status_alert_at,
+        averaging_count=averaging_count,
     )
 
 
@@ -422,6 +455,7 @@ def record_status_alert(state: PilotState, now: datetime) -> PilotState:
         orders_today=orders_today,
         last_order_at=state.last_order_at,
         last_status_alert_at=now.isoformat(timespec="seconds"),
+        averaging_count=state.averaging_count if state.date == today else 0,
     )
 
 
@@ -528,6 +562,7 @@ def build_strategy_context(
     ohlcv: pd.DataFrame,
     balances: Balances,
     trade_price: Decimal,
+    metadata: Optional[dict] = None,
 ) -> StrategyContext:
     """Build a StrategyContext from live balances and recent candles."""
     base = market_base_currency(market)
@@ -546,6 +581,7 @@ def build_strategy_context(
         avg_buy_price=avg_buy_price,
         cash=float(krw_balance),
         portfolio_value=float(portfolio_value),
+        metadata=metadata or {},
     )
 
 
@@ -1046,6 +1082,17 @@ def run_cycle(
     balances = client.get_balances()
     orderbook = client.get_orderbook(args.market)
     assert_spread_ok(orderbook.spread_pct, args.max_spread_pct)
+    base = market_base_currency(args.market)
+    coin_total = balances.get_total(base)
+    coin_value = coin_total * ticker.trade_price
+    if coin_value < args.min_order_krw and state.averaging_count:
+        state = PilotState(
+            date=state.date,
+            orders_today=state.orders_today,
+            last_order_at=state.last_order_at,
+            last_status_alert_at=state.last_status_alert_at,
+            averaging_count=0,
+        )
 
     portfolio_equity = calculate_portfolio_equity(
         market=args.market,
@@ -1065,6 +1112,10 @@ def run_cycle(
         ohlcv=ohlcv,
         balances=balances,
         trade_price=ticker.trade_price,
+        metadata={
+            "profile": runtime_profile.profile,
+            "averaging_count": state.averaging_count,
+        },
     )
     decision = strategy.generate_signal(ctx)
     plan = build_pilot_plan(
@@ -1078,9 +1129,6 @@ def run_cycle(
         dry_run=dry_run,
     )
 
-    base = market_base_currency(args.market)
-    coin_total = balances.get_total(base)
-    coin_value = coin_total * ticker.trade_price
     print(f"\n[{now.isoformat(timespec='seconds')}]")
     print("[프로필]")
     print(
@@ -1094,6 +1142,7 @@ def run_cycle(
     print(f"현재가: {ticker.trade_price:,} KRW")
     print(f"스프레드: {orderbook.spread_pct * Decimal('100'):.4f}%")
     print(f"오늘 주문수: {state.orders_today}/{args.max_orders_per_day}")
+    print(f"추매 카운트: {state.averaging_count}")
 
     print("\n[위험 게이트]")
     print(f"계좌 평가액: {quantize_krw(risk_report.equity):,} KRW")
@@ -1173,7 +1222,18 @@ def run_cycle(
         return None
 
     if not dry_run:
-        save_pilot_state(state_path, record_order(state, now))
+        save_pilot_state(
+            state_path,
+            record_order(
+                state,
+                now,
+                action=plan.action,
+                is_averaging=(
+                    plan.action == "BUY" and
+                    "controlled averaging" in plan.reason
+                ),
+            ),
+        )
     notify_safely(
         notifier=notifier,
         embed=build_order_alert_embed(

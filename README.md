@@ -134,6 +134,7 @@ ETH/Cash Regime은 2024년 말 이후 ETH 단순보유가 크게 흔들린 구�
 - 더 공격적인 소액 실험은 `--profile aggressive4h`를 사용하며, RSI 저점 탐색 진입과 더 높은 ETH 목표 비중을 허용
 - `--profile stable_quality`는 4시간봉 방어형 적응 알파, `--profile scalp_active`는 5분봉 스캘핑, `--profile scalp_1m`은 1분봉 초공격 스캘핑 파일럿
 - Discord 컨트롤 봇은 `logs/eth_cash_live_profile.json`을 바꿔 Stable/Scalp 5m/Scalp 1m 모드를 다음 사이클부터 전환
+- 스캘핑 모드는 손실 중에도 추세/변동성/RSI 조건이 살아 있으면 최대 2회까지만 제한 추매하고, 평균단가 기준 익절과 하드 손절을 유지
 - 계좌 위험 게이트가 일일 손실, 주간 손실, MDD, 킬스위치 파일(`logs/KILL_SWITCH_ACTIVE`)을 주문 직전에 강제
 - `DISCORD_WEBHOOK_URL`이 설정되어 있으면 LIVE 주문, 위험 차단, 러너 오류, 주기적 상태 리포트를 Discord로 알림
 - 시장가 매수는 KRW 금액만, 시장가 매도는 ETH 수량만 전송하는 빗썸 V2 비대칭 규칙 준수
