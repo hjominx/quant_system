@@ -173,3 +173,13 @@ python scripts/run_discord_control_bot.py --no-file-log
 패널 기능: `Status`, `Price`, `Assets`, `Orders`, `Risk`, `Logs`, `Refresh Panel`, `Buy 5k`, `Buy 10k`, `Buy 25k`, `Sell ALL`, `Kill ON`, `Kill OFF`.
 조회 버튼은 계좌/주문 상태만 읽고, 수동매매/킬스위치 버튼은 `DISCORD_ADMIN_USER_IDS`에 등록된 사용자만 실행할 수 있습니다. 수동매매는 2단계 확인 후 LIVE 모드, 킬스위치, 미체결 주문, 스프레드, 리스크 게이트, 쿨다운/일일 한도, 포지션 한도를 모두 통과해야 실행됩니다.
 컨트롤 패널은 기본적으로 sticky 모드로 동작해 새 채널 메시지가 올라오면 기존 패널을 삭제하고 다시 게시해 하단에 유지합니다. 필요하면 `--no-sticky-panel`로 끌 수 있습니다.
+
+## ETH 모델 연구
+
+현재 라이브 모델과 새 지표 조합 후보를 최근 18/12/6개월 기준으로 비교하려면:
+
+```bash
+python scripts/research_eth_adaptive_alpha.py --months 18,12,6
+```
+
+새 후보 `ETHAdaptiveAlphaStrategy`는 단순 SMA 교차가 아니라 Donchian 돌파, ADX 추세강도, ATR 변동성/트레일링 스탑, RSI, 비용 대비 최소 모멘텀 필터를 함께 사용합니다. 이 스크립트는 연구용이며, 결과가 좋아도 별도 Walk-Forward 검증 전에는 LIVE 투입하지 않습니다.
