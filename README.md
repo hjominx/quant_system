@@ -133,7 +133,8 @@ ETH/Cash Regime은 2024년 말 이후 ETH 단순보유가 크게 흔들린 구�
 - 기본 프로필은 4시간봉 `intraday4h`이며 `--loop`, `--interval-minutes`, `--cooldown-minutes`, `--max-orders-per-day`로 반복 주기를 제어
 - 더 공격적인 소액 실험은 `--profile aggressive4h`를 사용하며, RSI 저점 탐색 진입과 더 높은 ETH 목표 비중을 허용
 - `--profile stable_quality`는 4시간봉 방어형 적응 알파, `--profile scalp_active`는 5분봉 스캘핑, `--profile scalp_1m`은 1분봉 초공격 스캘핑 파일럿
-- Discord 컨트롤 봇은 `logs/eth_cash_live_profile.json`을 바꿔 Stable/Scalp 5m/Scalp 1m 모드를 다음 사이클부터 전환
+- `--profile pulse_10s`는 선택한 KRW 알트 마켓에서 1초마다 판단하고, 10분마다 최대 100,000원 pulse 매수를 시작하며, 매수 3초 후부터 +0.30% 익절 / -0.04% 손절을 감시
+- Discord 컨트롤 봇은 `logs/eth_cash_live_profile.json`을 바꿔 Stable/Scalp 5m/Scalp 1m/Pulse 모드를 다음 사이클부터 전환하고, Pulse 시장은 `logs/pulse_market.json` 또는 `Set Market` 버튼으로 변경
 - 스캘핑 모드는 손실 중에도 추세/변동성/RSI 조건이 살아 있으면 최대 2회까지만 제한 추매하고, 평균단가 기준 익절과 하드 손절을 유지
 - 계좌 위험 게이트가 일일 손실, 주간 손실, MDD, 킬스위치 파일(`logs/KILL_SWITCH_ACTIVE`)을 주문 직전에 강제
 - `DISCORD_WEBHOOK_URL`이 설정되어 있으면 LIVE 주문, 위험 차단, 러너 오류, 주기적 상태 리포트를 Discord로 알림
@@ -173,7 +174,7 @@ pip install -r requirements.txt
 python scripts/run_discord_control_bot.py --no-file-log
 ```
 
-패널 기능: `Status`, `Price`, `Assets`, `Orders`, `Risk`, `Logs`, `Refresh Panel`, `Buy 5k`, `Buy 10k`, `Buy 25k`, `Sell ALL`, `Kill ON`, `Kill OFF`.
+패널 기능: `Status`, `Price`, `Assets`, `Orders`, `Risk`, `Logs`, `Refresh Panel`, `Buy 5k`, `Buy 10k`, `Buy 25k`, `Sell ALL`, `Kill ON`, `Kill OFF`, `Stable Mode`, `Scalp 5m`, `Scalp 1m`, `Pulse 1s`, `Set Market`.
 조회 버튼은 계좌/주문 상태만 읽고, 수동매매/킬스위치 버튼은 `DISCORD_ADMIN_USER_IDS`에 등록된 사용자만 실행할 수 있습니다. 수동매매는 2단계 확인 후 LIVE 모드, 킬스위치, 미체결 주문, 스프레드, 리스크 게이트, 쿨다운/일일 한도, 포지션 한도를 모두 통과해야 실행됩니다.
 컨트롤 패널은 기본적으로 sticky 모드로 동작해 새 채널 메시지가 올라오면 기존 패널을 삭제하고 다시 게시해 하단에 유지합니다. 필요하면 `--no-sticky-panel`로 끌 수 있습니다.
 

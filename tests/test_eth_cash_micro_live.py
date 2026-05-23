@@ -37,18 +37,23 @@ from scripts.run_eth_cash_micro_live import (
     clock_status_alert_due,
     format_sleep_wait,
     format_cooldown,
+    load_runtime_market_mode,
     load_runtime_profile_mode,
+    normalize_krw_market,
     record_order,
     record_status_alert,
     resolve_runtime_profile,
+    save_runtime_market_mode,
     save_runtime_profile_mode,
     status_alert_due,
     strategy_params_for_profile,
+    validate_profile_market,
     validate_live_permission,
 )
 from strategies.base import Signal, TradeDecision
 from strategies.eth_adaptive_alpha import ETHAdaptiveAlphaStrategy
 from strategies.eth_micro_scalper import ETHMicroScalperStrategy
+from strategies.eth_pulse_scalper import PulseScalperStrategy
 
 
 class FakeConfig:
@@ -281,11 +286,28 @@ def test_scalp_1m_profile_uses_micro_scalper():
     print("  ✓ 1분봉 초공격 스캘핑 파라미터 적용")
 
 
+def test_pulse_profile_uses_generic_scalper():
+    print("\n[테스트 11] Pulse 프로필")
+    print("-" * 60)
+
+    strategy = build_strategy_for_profile("pulse_10s")
+
+    assert isinstance(strategy, PulseScalperStrategy)
+    assert strategy.params["buy_interval_seconds"] == 600
+    assert strategy.params["min_exit_hold_seconds"] == 3
+    assert strategy.params["take_profit_pct"] == 0.0030
+    assert strategy.params["stop_loss_pct"] == 0.0004
+
+    print("  ✓ pulse_10s가 범용 PulseScalperStrategy로 연결됨")
+    print("  ✓ 10분 매수/3초 후 TP-SL/0.3% 익절/0.04% 손절 적용")
+
+
 def test_runtime_profile_mode_file_switches_stable_and_scalp():
-    print("\n[테스트 11] 런타임 프로필 파일")
+    print("\n[테스트 12] 런타임 프로필 파일")
     print("-" * 60)
 
     class Args:
+        market = "KRW-ETH"
         profile = "stable_quality"
         timeframe = "4h"
         candle_count = 200
@@ -294,6 +316,7 @@ def test_runtime_profile_mode_file_switches_stable_and_scalp():
         path = Path(tmpdir) / "profile.json"
         fallback = resolve_runtime_profile(Args, path)
         assert fallback.profile == "stable_quality"
+        assert fallback.market == "KRW-ETH"
         assert fallback.timeframe == "4h"
         assert fallback.source == "service args"
 
@@ -317,8 +340,50 @@ def test_runtime_profile_mode_file_switches_stable_and_scalp():
     print("  ✓ Discord 모드 파일로 stable/scalp 전환 가능")
 
 
+def test_runtime_pulse_market_file_switches_alt_market():
+    print("\n[테스트 13] Pulse 런타임 시장 파일")
+    print("-" * 60)
+
+    class Args:
+        market = "KRW-ETH"
+        profile = "stable_quality"
+        timeframe = "4h"
+        candle_count = 200
+
+    with TemporaryDirectory() as tmpdir:
+        profile_path = Path(tmpdir) / "profile.json"
+        market_path = Path(tmpdir) / "market.json"
+        save_runtime_profile_mode(profile_path, "pulse_10s", updated_by="test")
+        save_runtime_market_mode(market_path, "krw-sol", updated_by="test")
+
+        assert load_runtime_market_mode(market_path) == "KRW-SOL"
+        pulse = resolve_runtime_profile(Args, profile_path, market_path)
+        assert pulse.profile == "pulse_10s"
+        assert pulse.market == "KRW-SOL"
+        assert pulse.timeframe == "1m"
+        assert pulse.candle_count == 10
+
+    print("  ✓ Pulse 모드에서 Discord 파일로 KRW 알트 마켓 전환 가능")
+
+
+def test_profile_market_validation_keeps_non_pulse_eth_only():
+    print("\n[테스트 14] 프로필별 시장 검증")
+    print("-" * 60)
+
+    assert normalize_krw_market("krw-xrp") == "KRW-XRP"
+    validate_profile_market("pulse_10s", "KRW-XRP")
+
+    try:
+        validate_profile_market("stable_quality", "KRW-XRP")
+        raise AssertionError("stable_quality에서 알트 마켓이 허용됨")
+    except ValueError:
+        pass
+
+    print("  ✓ Pulse만 KRW 알트 선택 가능, 안정/스캘핑 프로필은 ETH 전용 유지")
+
+
 def test_order_quota_blocks_cooldown_and_daily_limit():
-    print("\n[테스트 12] 주문 쿨다운/일일 한도")
+    print("\n[테스트 15] 주문 쿨다운/일일 한도")
     print("-" * 60)
 
     now = datetime(2026, 5, 22, 9, 0, 0)
@@ -393,9 +458,25 @@ def test_order_quota_supports_second_cooldown():
         cooldown_minutes=15,
         cooldown_seconds=10,
     )
+    assert_order_quota(
+        state=state,
+        now=now,
+        max_orders_per_day=300,
+        cooldown_minutes=15,
+        cooldown_seconds=0,
+    )
+    assert_order_quota(
+        state=state,
+        now=now + timedelta(seconds=1),
+        max_orders_per_day=300,
+        cooldown_minutes=15,
+        cooldown_seconds=10,
+        action="SELL",
+        allow_sell_during_cooldown=True,
+    )
     assert format_cooldown(15, 10) == "10s"
 
-    print("  ✓ 10초 쿨다운 적용")
+    print("  ✓ 10초 쿨다운, 0초 쿨다운, 청산 예외 적용")
 
 
 def test_record_order_tracks_averaging_count():
@@ -407,6 +488,9 @@ def test_record_order_tracks_averaging_count():
 
     entry = record_order(state, now, action="BUY")
     assert entry.averaging_count == 0
+
+    pulse_entry = record_order(state, now, action="BUY", is_pulse=True)
+    assert pulse_entry.last_pulse_buy_at == now.isoformat(timespec="seconds")
 
     first_add = record_order(
         entry,
@@ -672,7 +756,14 @@ def test_hourly_status_alert_and_clock_aligned_sleep():
         interval_minutes=15,
         align_to_clock=False,
     ) == 900
+    assert calculate_sleep_seconds(
+        now=datetime(2026, 5, 23, 9, 20, 41),
+        interval_minutes=15,
+        align_to_clock=False,
+        interval_seconds=1,
+    ) == 1
     assert format_sleep_wait(559) == "9.3분"
+    assert format_sleep_wait(1) == "1초"
 
     print("  ✓ 정각 알림은 00분 사이클에서만 발생")
     print("  ✓ 15분 루프가 다음 00/15/30/45분 경계로 정렬됨")
@@ -694,7 +785,10 @@ def main():
         test_stable_quality_profile_uses_adaptive_alpha,
         test_scalp_active_profile_uses_micro_scalper,
         test_scalp_1m_profile_uses_micro_scalper,
+        test_pulse_profile_uses_generic_scalper,
         test_runtime_profile_mode_file_switches_stable_and_scalp,
+        test_runtime_pulse_market_file_switches_alt_market,
+        test_profile_market_validation_keeps_non_pulse_eth_only,
         test_order_quota_blocks_cooldown_and_daily_limit,
         test_order_quota_supports_second_cooldown,
         test_record_order_tracks_averaging_count,

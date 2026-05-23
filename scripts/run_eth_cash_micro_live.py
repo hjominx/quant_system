@@ -63,6 +63,7 @@ from strategies.base import Signal, StrategyContext, TradeDecision
 from strategies.eth_adaptive_alpha import ETHAdaptiveAlphaStrategy
 from strategies.eth_cash_regime import ETHCashRegimeStrategy
 from strategies.eth_micro_scalper import ETHMicroScalperStrategy
+from strategies.eth_pulse_scalper import PulseScalperStrategy
 from utils.config import Config, get_config
 from utils.logger import setup_logging
 
@@ -75,7 +76,8 @@ KRW_QUANT = Decimal("1")
 VOLUME_QUANT = Decimal("0.00000001")
 ADAPTIVE_ALPHA_PROFILES = {"stable_quality"}
 SCALP_PROFILES = {"scalp_active", "scalp_1m"}
-RUNTIME_PROFILE_CHOICES = {"stable_quality", "scalp_active", "scalp_1m"}
+PULSE_PROFILES = {"pulse_10s"}
+RUNTIME_PROFILE_CHOICES = {"stable_quality", "scalp_active", "scalp_1m", "pulse_10s"}
 PROFILE_DEFAULT_TIMEFRAMES = {
     "daily": "1d",
     "intraday4h": "4h",
@@ -83,10 +85,12 @@ PROFILE_DEFAULT_TIMEFRAMES = {
     "stable_quality": "4h",
     "scalp_active": "5m",
     "scalp_1m": "1m",
+    "pulse_10s": "1m",
 }
 PROFILE_DEFAULT_CANDLE_COUNTS = {
     "scalp_active": 200,
     "scalp_1m": 200,
+    "pulse_10s": 10,
 }
 
 
@@ -106,6 +110,7 @@ class PilotState:
     date: str
     orders_today: int = 0
     last_order_at: Optional[str] = None
+    last_pulse_buy_at: Optional[str] = None
     last_status_alert_at: Optional[str] = None
     averaging_count: int = 0
 
@@ -114,9 +119,11 @@ class PilotState:
 class RuntimeProfile:
     """Runtime strategy mode resolved for one live cycle."""
     profile: str
+    market: str
     timeframe: str
     candle_count: int
     source: str
+    market_source: str
 
 
 def strategy_params_for_profile(profile: str) -> dict:
@@ -272,12 +279,23 @@ def strategy_params_for_profile(profile: str) -> dict:
             "averaging_momentum_floor": -0.0025,
             "averaging_trend_floor": 0.993,
         }
+    if profile == "pulse_10s":
+        return {
+            "buy_interval_seconds": 600,
+            "min_exit_hold_seconds": 3,
+            "take_profit_pct": 0.0030,
+            "stop_loss_pct": 0.0004,
+            "max_position": 1.0,
+            "required_history_days": 1,
+        }
     raise ValueError(f"지원하지 않는 profile: {profile}")
 
 
 def build_strategy_for_profile(profile: str):
     """Build the strategy implementation mapped to a live profile."""
     params = strategy_params_for_profile(profile)
+    if profile in PULSE_PROFILES:
+        return PulseScalperStrategy(params=params)
     if profile in SCALP_PROFILES:
         return ETHMicroScalperStrategy(params=params)
     if profile in ADAPTIVE_ALPHA_PROFILES:
@@ -292,7 +310,7 @@ def default_timeframe_for_profile(profile: str) -> str:
 
 def default_candle_count_for_profile(profile: str, fallback: int) -> int:
     """Return a profile-specific candle count when one is required."""
-    return max(fallback, PROFILE_DEFAULT_CANDLE_COUNTS.get(profile, fallback))
+    return PROFILE_DEFAULT_CANDLE_COUNTS.get(profile, fallback)
 
 
 def validate_profile_timeframe(profile: str, timeframe: str) -> None:
@@ -303,6 +321,8 @@ def validate_profile_timeframe(profile: str, timeframe: str) -> None:
     if profile in ("intraday4h", "aggressive4h", "stable_quality") and timeframe != "4h":
         raise ValueError(f"{profile} profile은 --timeframe 4h와 함께 사용해야 합니다.")
     if profile in SCALP_PROFILES and timeframe != expected:
+        raise ValueError(f"{profile} profile은 --timeframe {expected}와 함께 사용해야 합니다.")
+    if profile in PULSE_PROFILES and timeframe != expected:
         raise ValueError(f"{profile} profile은 --timeframe {expected}와 함께 사용해야 합니다.")
 
 
@@ -337,7 +357,56 @@ def save_runtime_profile_mode(path: Path, profile: str, *, updated_by: str = "lo
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def resolve_runtime_profile(args: argparse.Namespace, profile_mode_path: Path) -> RuntimeProfile:
+def normalize_krw_market(market: str) -> str:
+    """Normalize and validate a Bithumb KRW market code."""
+    normalized = market.strip().upper()
+    parts = normalized.split("-")
+    if len(parts) != 2 or parts[0] != "KRW" or not parts[1].isalnum():
+        raise ValueError(f"KRW 마켓 형식이어야 합니다. 예: KRW-SOL (입력: {market})")
+    return normalized
+
+
+def validate_profile_market(profile: str, market: str) -> None:
+    """Validate whether a market can run with the selected profile."""
+    normalized = normalize_krw_market(market)
+    if profile not in PULSE_PROFILES and normalized != MARKET:
+        raise ValueError(f"{profile} profile은 ETH 전용입니다. --market {MARKET}만 허용합니다.")
+
+
+def load_runtime_market_mode(path: Path) -> Optional[str]:
+    """Load the Discord-switchable Pulse KRW market from JSON or plain text."""
+    if not path.exists():
+        return None
+    raw_text = path.read_text(encoding="utf-8").strip()
+    if not raw_text:
+        return None
+    try:
+        raw = json.loads(raw_text)
+        market = raw.get("market")
+    except json.JSONDecodeError:
+        market = raw_text
+    if not market:
+        return None
+    return normalize_krw_market(str(market))
+
+
+def save_runtime_market_mode(path: Path, market: str, *, updated_by: str = "local") -> None:
+    """Persist the Discord-switchable Pulse KRW market."""
+    normalized = normalize_krw_market(market)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "market": normalized,
+        "updated_by": updated_by,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def resolve_runtime_profile(
+    args: argparse.Namespace,
+    profile_mode_path: Path,
+    market_mode_path: Optional[Path] = None,
+) -> RuntimeProfile:
     """Resolve the strategy/timeframe for the current cycle."""
     profile = load_runtime_profile_mode(profile_mode_path)
     source = str(profile_mode_path) if profile else "service args"
@@ -347,12 +416,22 @@ def resolve_runtime_profile(args: argparse.Namespace, profile_mode_path: Path) -
     else:
         timeframe = default_timeframe_for_profile(profile)
     validate_profile_timeframe(profile, timeframe)
+    market = normalize_krw_market(args.market)
+    market_source = "service args"
+    if profile in PULSE_PROFILES and market_mode_path is not None:
+        runtime_market = load_runtime_market_mode(market_mode_path)
+        if runtime_market:
+            market = runtime_market
+            market_source = str(market_mode_path)
+    validate_profile_market(profile, market)
     candle_count = default_candle_count_for_profile(profile, args.candle_count)
     return RuntimeProfile(
         profile=profile,
+        market=market,
         timeframe=timeframe,
         candle_count=candle_count,
         source=source,
+        market_source=market_source,
     )
 
 
@@ -367,6 +446,7 @@ def load_pilot_state(path: Path, now: datetime) -> PilotState:
         date=str(raw.get("date", today)),
         orders_today=int(raw.get("orders_today", 0)),
         last_order_at=raw.get("last_order_at"),
+        last_pulse_buy_at=raw.get("last_pulse_buy_at"),
         last_status_alert_at=raw.get("last_status_alert_at"),
         averaging_count=int(raw.get("averaging_count", 0)),
     )
@@ -384,6 +464,7 @@ def save_pilot_state(path: Path, state: PilotState) -> None:
                 "date": state.date,
                 "orders_today": state.orders_today,
                 "last_order_at": state.last_order_at,
+                "last_pulse_buy_at": state.last_pulse_buy_at,
                 "last_status_alert_at": state.last_status_alert_at,
                 "averaging_count": state.averaging_count,
             },
@@ -400,12 +481,16 @@ def assert_order_quota(
     max_orders_per_day: int,
     cooldown_minutes: int,
     cooldown_seconds: Optional[int] = None,
+    action: Optional[str] = None,
+    allow_sell_during_cooldown: bool = False,
 ) -> None:
     """Reject a live order when daily count or cooldown would be violated."""
     if state.orders_today >= max_orders_per_day:
         raise RuntimeError(
             f"일일 주문 횟수 한도 도달: {state.orders_today}/{max_orders_per_day}"
         )
+    if action == "SELL" and allow_sell_during_cooldown:
+        return
     if not state.last_order_at:
         return
     last_order_at = datetime.fromisoformat(state.last_order_at)
@@ -428,19 +513,24 @@ def record_order(
     *,
     action: Optional[str] = None,
     is_averaging: bool = False,
+    is_pulse: bool = False,
 ) -> PilotState:
     """Return state after one accepted order."""
     today = now.date().isoformat()
     orders_today = state.orders_today if state.date == today else 0
     averaging_count = state.averaging_count if state.date == today else 0
+    last_pulse_buy_at = state.last_pulse_buy_at if state.date == today else None
     if action == "SELL":
         averaging_count = 0
     elif action == "BUY" and is_averaging:
         averaging_count += 1
+    if action == "BUY" and is_pulse:
+        last_pulse_buy_at = now.isoformat(timespec="seconds")
     return PilotState(
         date=today,
         orders_today=orders_today + 1,
         last_order_at=now.isoformat(timespec="seconds"),
+        last_pulse_buy_at=last_pulse_buy_at,
         last_status_alert_at=state.last_status_alert_at,
         averaging_count=averaging_count,
     )
@@ -454,6 +544,7 @@ def record_status_alert(state: PilotState, now: datetime) -> PilotState:
         date=today,
         orders_today=orders_today,
         last_order_at=state.last_order_at,
+        last_pulse_buy_at=state.last_pulse_buy_at if state.date == today else None,
         last_status_alert_at=now.isoformat(timespec="seconds"),
         averaging_count=state.averaging_count if state.date == today else 0,
     )
@@ -694,7 +785,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--profile",
-        choices=["intraday4h", "aggressive4h", "daily", "stable_quality", "scalp_active", "scalp_1m"],
+        choices=[
+            "intraday4h",
+            "aggressive4h",
+            "daily",
+            "stable_quality",
+            "scalp_active",
+            "scalp_1m",
+            "pulse_10s",
+        ],
         default=DEFAULT_PROFILE,
     )
     parser.add_argument("--candle-count", type=int, default=DEFAULT_CANDLE_COUNT)
@@ -704,6 +803,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-spread-pct", type=parse_decimal, default=Decimal("0.005"))
     parser.add_argument("--loop", action="store_true", help="Keep running guarded decision cycles.")
     parser.add_argument("--interval-minutes", type=int, default=60)
+    parser.add_argument(
+        "--interval-seconds",
+        type=int,
+        default=None,
+        help="Override loop interval in seconds. Use for ticker-level pulse monitoring.",
+    )
     parser.add_argument(
         "--align-interval-to-clock",
         action="store_true",
@@ -748,6 +853,11 @@ def parse_args() -> argparse.Namespace:
         default="logs/eth_cash_live_profile.json",
         help="Optional runtime profile file. Discord can switch stable/scalp by writing here.",
     )
+    parser.add_argument(
+        "--market-mode-file",
+        default="logs/pulse_market.json",
+        help="Optional runtime market file for pulse_10s. Discord can switch KRW alt markets here.",
+    )
     parser.add_argument("--live", action="store_true", help="Send real orders. Requires TRADING_MODE=LIVE.")
     parser.add_argument("--yes-i-understand-risk", action="store_true")
     parser.add_argument("--notify-dry-run", action="store_true", help="Send Discord alerts for dry-run orders/errors.")
@@ -757,11 +867,15 @@ def parse_args() -> argparse.Namespace:
 
 def validate_runner_args(args: argparse.Namespace) -> None:
     """Validate runtime argument combinations."""
-    if args.market != MARKET:
-        raise ValueError("현재 파일럿은 ETH 전용입니다. --market KRW-ETH만 허용합니다.")
+    args.market = normalize_krw_market(args.market)
+    validate_profile_market(args.profile, args.market)
     validate_profile_timeframe(args.profile, args.timeframe)
     if args.interval_minutes <= 0:
         raise ValueError("--interval-minutes는 1 이상이어야 합니다.")
+    if args.interval_seconds is not None and args.interval_seconds <= 0:
+        raise ValueError("--interval-seconds는 1 이상이어야 합니다.")
+    if args.interval_seconds is not None and args.align_interval_to_clock:
+        raise ValueError("--interval-seconds와 --align-interval-to-clock은 함께 사용할 수 없습니다.")
     if args.align_interval_to_clock and 1440 % args.interval_minutes != 0:
         raise ValueError("--align-interval-to-clock은 하루를 나누는 interval에서만 사용하세요.")
     if args.cooldown_minutes < 0:
@@ -794,7 +908,7 @@ def print_banner(args: argparse.Namespace, dry_run: bool) -> None:
         f"min_order={args.min_order_krw:,} KRW"
     )
     print(
-        f"loop={args.loop} interval={args.interval_minutes}m "
+        f"loop={args.loop} interval={format_interval(args.interval_minutes, args.interval_seconds)} "
         f"cooldown={format_cooldown(args.cooldown_minutes, args.cooldown_seconds)} "
         f"max_orders/day={args.max_orders_per_day}"
     )
@@ -803,6 +917,7 @@ def print_banner(args: argparse.Namespace, dry_run: bool) -> None:
     print(f"sleep_mode={'clock-aligned' if args.align_interval_to_clock else 'fixed'}")
     print(f"risk_state={args.risk_state_file} kill_switch={args.kill_switch_file}")
     print(f"profile_mode_file={args.profile_mode_file}")
+    print(f"market_mode_file={args.market_mode_file}")
 
 
 def notify_safely(
@@ -924,8 +1039,11 @@ def calculate_sleep_seconds(
     now: datetime,
     interval_minutes: int,
     align_to_clock: bool,
+    interval_seconds: Optional[int] = None,
 ) -> int:
     """Calculate loop sleep seconds, optionally to the next clock boundary."""
+    if interval_seconds is not None:
+        return interval_seconds
     if not align_to_clock:
         return interval_minutes * 60
 
@@ -943,6 +1061,17 @@ def calculate_sleep_seconds(
     return max(next_boundary - seconds_since_midnight, 1)
 
 
+def format_interval(interval_minutes: int, interval_seconds: Optional[int]) -> str:
+    """Format loop interval for logs."""
+    if interval_seconds is not None:
+        if interval_seconds < 60:
+            return f"{interval_seconds}s"
+        if interval_seconds % 60 == 0:
+            return f"{interval_seconds // 60}m"
+        return f"{interval_seconds / 60:.1f}m"
+    return f"{interval_minutes}m"
+
+
 def format_cooldown(cooldown_minutes: int, cooldown_seconds: Optional[int]) -> str:
     """Format order cooldown for logs."""
     if cooldown_seconds is not None:
@@ -956,6 +1085,8 @@ def format_cooldown(cooldown_minutes: int, cooldown_seconds: Optional[int]) -> s
 
 def format_sleep_wait(seconds: int) -> str:
     """Format loop sleep duration for logs."""
+    if seconds < 60:
+        return f"{seconds}초"
     minutes = seconds / 60
     if minutes.is_integer():
         return f"{int(minutes)}분"
@@ -978,6 +1109,7 @@ def send_status_alert_if_due(
     state: PilotState,
     now: datetime,
     args: argparse.Namespace,
+    market: str,
     ticker,
     orderbook,
     balances: Balances,
@@ -1003,13 +1135,13 @@ def send_status_alert_if_due(
     try:
         prices_by_currency = fetch_krw_prices_for_balances(client, balances)
         filled_orders = tuple(
-            client.get_orders(market=args.market, state="done", limit=5)
+            client.get_orders(market=market, state="done", limit=5)
         )
         canceled_orders = tuple(
-            client.get_orders(market=args.market, state="cancel", limit=5)
+            client.get_orders(market=market, state="cancel", limit=5)
         )
         snapshot = AccountSnapshot(
-            market=args.market,
+            market=market,
             ticker=ticker,
             orderbook=orderbook,
             balances=balances,
@@ -1059,7 +1191,11 @@ def run_cycle(
     """Run one guarded decision cycle and optionally place one order."""
     now = datetime.now()
     state = load_pilot_state(state_path, now)
-    runtime_profile = resolve_runtime_profile(args, Path(args.profile_mode_file))
+    runtime_profile = resolve_runtime_profile(
+        args,
+        Path(args.profile_mode_file),
+        Path(args.market_mode_file),
+    )
 
     strategy = build_strategy_for_profile(runtime_profile.profile)
     if runtime_profile.candle_count < strategy.warmup_period() + 5:
@@ -1068,21 +1204,22 @@ def run_cycle(
     if not client.health_check():
         raise RuntimeError("빗썸 public API 헬스체크 실패")
 
-    open_orders = client.get_open_orders(args.market)
+    market = runtime_profile.market
+    open_orders = client.get_open_orders(market)
     if open_orders:
         raise RuntimeError(f"미체결 주문 {len(open_orders)}개 존재. 새 주문을 차단합니다.")
 
     candles = client.get_candles(
-        args.market,
+        market,
         unit=runtime_profile.timeframe,
         count=runtime_profile.candle_count,
     )
     ohlcv = candles_to_ohlcv(candles)
-    ticker = client.get_ticker(args.market)
+    ticker = client.get_ticker(market)
     balances = client.get_balances()
-    orderbook = client.get_orderbook(args.market)
+    orderbook = client.get_orderbook(market)
     assert_spread_ok(orderbook.spread_pct, args.max_spread_pct)
-    base = market_base_currency(args.market)
+    base = market_base_currency(market)
     coin_total = balances.get_total(base)
     coin_value = coin_total * ticker.trade_price
     if coin_value < args.min_order_krw and state.averaging_count:
@@ -1090,12 +1227,13 @@ def run_cycle(
             date=state.date,
             orders_today=state.orders_today,
             last_order_at=state.last_order_at,
+            last_pulse_buy_at=state.last_pulse_buy_at,
             last_status_alert_at=state.last_status_alert_at,
             averaging_count=0,
         )
 
     portfolio_equity = calculate_portfolio_equity(
-        market=args.market,
+        market=market,
         balances=balances,
         trade_price=ticker.trade_price,
     )
@@ -1108,13 +1246,16 @@ def run_cycle(
     )
 
     ctx = build_strategy_context(
-        market=args.market,
+        market=market,
         ohlcv=ohlcv,
         balances=balances,
         trade_price=ticker.trade_price,
         metadata={
             "profile": runtime_profile.profile,
             "averaging_count": state.averaging_count,
+            "last_pulse_buy_at": state.last_pulse_buy_at,
+            "now": now.isoformat(timespec="seconds"),
+            "trade_price": float(ticker.trade_price),
         },
     )
     decision = strategy.generate_signal(ctx)
@@ -1122,7 +1263,7 @@ def run_cycle(
         decision=decision,
         balances=balances,
         trade_price=ticker.trade_price,
-        market=args.market,
+        market=market,
         max_order_krw=args.max_order_krw,
         max_position_krw=args.max_position_krw,
         min_order_krw=args.min_order_krw,
@@ -1132,9 +1273,12 @@ def run_cycle(
     print(f"\n[{now.isoformat(timespec='seconds')}]")
     print("[프로필]")
     print(
-        f"profile={runtime_profile.profile} timeframe={runtime_profile.timeframe} "
+        f"profile={runtime_profile.profile} market={market} "
+        f"timeframe={runtime_profile.timeframe} "
         f"candles={runtime_profile.candle_count} source={runtime_profile.source}"
     )
+    if runtime_profile.market_source != "service args":
+        print(f"market_source={runtime_profile.market_source}")
     print("[상태]")
     print(f"KRW 가용: {balances.krw_balance:,}")
     print(f"{base} 총량: {coin_total}")
@@ -1143,6 +1287,8 @@ def run_cycle(
     print(f"스프레드: {orderbook.spread_pct * Decimal('100'):.4f}%")
     print(f"오늘 주문수: {state.orders_today}/{args.max_orders_per_day}")
     print(f"추매 카운트: {state.averaging_count}")
+    if runtime_profile.profile in PULSE_PROFILES:
+        print(f"마지막 pulse 매수: {state.last_pulse_buy_at or '없음'}")
 
     print("\n[위험 게이트]")
     print(f"계좌 평가액: {quantize_krw(risk_report.equity):,} KRW")
@@ -1176,6 +1322,7 @@ def run_cycle(
         state=state,
         now=now,
         args=args,
+        market=market,
         ticker=ticker,
         orderbook=orderbook,
         balances=balances,
@@ -1214,9 +1361,11 @@ def run_cycle(
                 max_orders_per_day=args.max_orders_per_day,
                 cooldown_minutes=args.cooldown_minutes,
                 cooldown_seconds=args.cooldown_seconds,
+                action=plan.action,
+                allow_sell_during_cooldown=runtime_profile.profile in PULSE_PROFILES,
             )
 
-    order = execute_plan(client, args.market, plan)
+    order = execute_plan(client, market, plan)
     if order is None:
         print("\n주문 없음.")
         return None
@@ -1232,6 +1381,10 @@ def run_cycle(
                     plan.action == "BUY" and
                     "controlled averaging" in plan.reason
                 ),
+                is_pulse=(
+                    plan.action == "BUY" and
+                    runtime_profile.profile in PULSE_PROFILES
+                ),
             ),
         )
     notify_safely(
@@ -1239,7 +1392,7 @@ def run_cycle(
         embed=build_order_alert_embed(
             plan=plan,
             order=order,
-            market=args.market,
+            market=market,
             equity=risk_report.equity,
             dry_run=dry_run,
         ),
@@ -1304,6 +1457,7 @@ def main() -> None:
                 now=datetime.now(),
                 interval_minutes=args.interval_minutes,
                 align_to_clock=args.align_interval_to_clock,
+                interval_seconds=args.interval_seconds,
             )
             print(f"\n다음 판단까지 {format_sleep_wait(sleep_seconds)} 대기...")
             time.sleep(sleep_seconds)

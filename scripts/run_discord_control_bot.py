@@ -56,10 +56,13 @@ from scripts.run_eth_cash_micro_live import (
     calculate_sell_volume,
     default_timeframe_for_profile,
     load_pilot_state,
+    load_runtime_market_mode,
     load_runtime_profile_mode,
     market_base_currency,
+    normalize_krw_market,
     record_order,
     save_runtime_profile_mode,
+    save_runtime_market_mode,
     save_pilot_state,
 )
 from utils.config import get_config
@@ -117,6 +120,7 @@ class QuantControlController:
         risk_state_path: Path,
         pilot_state_path: Path,
         profile_mode_path: Path,
+        market_mode_path: Path,
         service_name: str,
         admin_user_ids: set[str],
         max_manual_order_krw: Decimal,
@@ -134,6 +138,7 @@ class QuantControlController:
         self.risk_state_path = risk_state_path
         self.pilot_state_path = pilot_state_path
         self.profile_mode_path = profile_mode_path
+        self.market_mode_path = market_mode_path
         self.service_name = service_name
         self.admin_user_ids = admin_user_ids
         self.max_manual_order_krw = max_manual_order_krw
@@ -162,13 +167,26 @@ class QuantControlController:
         """Persist a runtime stable/scalp profile selection."""
         save_runtime_profile_mode(self.profile_mode_path, profile, updated_by=updated_by)
 
+    def current_market_mode(self) -> str:
+        """Return the active market for the currently selected profile."""
+        if self.current_profile_mode() == "pulse_10s":
+            return load_runtime_market_mode(self.market_mode_path) or self.market
+        return self.market
+
+    def set_pulse_market(self, market: str, *, updated_by: str) -> str:
+        """Persist the Pulse KRW market and return the normalized value."""
+        normalized = normalize_krw_market(market)
+        save_runtime_market_mode(self.market_mode_path, normalized, updated_by=updated_by)
+        return normalized
+
     async def collect_snapshot_embeds(self, report: str) -> list[discord.Embed]:
         """Collect Bithumb account state and convert it to Discord embeds."""
+        market = self.current_market_mode()
         async with self.lock:
             snapshot = await asyncio.to_thread(
                 collect_account_snapshot,
                 self.client,
-                market=self.market,
+                market=market,
                 order_limit=self.order_limit,
             )
         embeds = build_snapshot_embeds(
@@ -181,11 +199,12 @@ class QuantControlController:
 
     async def build_risk_embed(self) -> discord.Embed:
         """Build risk and guard status embed."""
+        market = self.current_market_mode()
         async with self.lock:
             snapshot = await asyncio.to_thread(
                 collect_account_snapshot,
                 self.client,
-                market=self.market,
+                market=market,
                 order_limit=self.order_limit,
             )
         equity = estimate_total_equity(snapshot.balances, snapshot.prices_by_currency)
@@ -233,6 +252,7 @@ class QuantControlController:
         kill_state = "ACTIVE" if self.kill_switch_path.exists() else "inactive"
         profile = self.current_profile_mode()
         timeframe = default_timeframe_for_profile(profile)
+        market = self.current_market_mode()
         color = COLOR_DANGER if self.kill_switch_path.exists() else COLOR_INFO
         admin_state = (
             f"{len(self.admin_user_ids)} admin id(s)"
@@ -247,7 +267,7 @@ class QuantControlController:
             ),
             color=color,
             fields=(
-                DiscordField("Market", self.market),
+                DiscordField("Market", market),
                 DiscordField("Mode", f"{profile} ({timeframe})"),
                 DiscordField("Live service", service_state),
                 DiscordField("Kill switch", kill_state),
@@ -271,15 +291,16 @@ class QuantControlController:
 
     def _execute_manual_buy_sync(self, amount: Decimal) -> discord.Embed:
         now = datetime.now()
+        market = self.current_market_mode()
         with BithumbClient.from_config(
             self.config,
             dry_run=False,
             allow_live_orders=self.config.is_live_trading,
         ) as live_client:
-            self._assert_manual_trade_preflight(live_client, "BUY", now)
-            ticker = live_client.get_ticker(self.market)
+            self._assert_manual_trade_preflight(live_client, "BUY", now, market=market)
+            ticker = live_client.get_ticker(market)
             balances = live_client.get_balances()
-            base = market_base_currency(self.market)
+            base = market_base_currency(market)
             current_position_krw = balances.get_total(base) * ticker.trade_price
             krw_amount = calculate_manual_buy_amount(
                 requested_amount=amount,
@@ -289,7 +310,7 @@ class QuantControlController:
                 max_manual_order_krw=self.max_manual_order_krw,
                 min_order_krw=self.min_order_krw,
             )
-            order = live_client.market_buy(self.market, krw_amount)
+            order = live_client.market_buy(market, krw_amount)
             self._record_manual_order(now, action="BUY")
             return build_manual_order_embed(
                 title="Manual BUY requested",
@@ -302,23 +323,24 @@ class QuantControlController:
 
     def _execute_manual_sell_all_sync(self) -> discord.Embed:
         now = datetime.now()
+        market = self.current_market_mode()
         with BithumbClient.from_config(
             self.config,
             dry_run=False,
             allow_live_orders=self.config.is_live_trading,
         ) as live_client:
-            self._assert_manual_trade_preflight(live_client, "SELL", now)
-            ticker = live_client.get_ticker(self.market)
+            self._assert_manual_trade_preflight(live_client, "SELL", now, market=market)
+            ticker = live_client.get_ticker(market)
             balances = live_client.get_balances()
-            base = market_base_currency(self.market)
+            base = market_base_currency(market)
             volume = calculate_sell_volume(
                 coin_balance=balances.get_total(base),
                 trade_price=ticker.trade_price,
                 min_order_krw=self.min_order_krw,
             )
             if volume <= 0:
-                raise RuntimeError("매도 가능한 ETH 평가액이 최소 주문금액 미만입니다.")
-            order = live_client.market_sell(self.market, volume)
+                raise RuntimeError("매도 가능한 선택 마켓 평가액이 최소 주문금액 미만입니다.")
+            order = live_client.market_sell(market, volume)
             self._record_manual_order(now, action="SELL")
             return build_manual_order_embed(
                 title="Manual SELL ALL requested",
@@ -334,21 +356,23 @@ class QuantControlController:
         live_client: BithumbClient,
         action: str,
         now: datetime,
+        *,
+        market: str,
     ) -> None:
         """Apply the same live safety gates before manual Discord orders."""
         if not self.config.is_live_trading:
             raise RuntimeError("TRADING_MODE=LIVE가 아니어서 수동매매를 차단합니다.")
 
-        open_orders = live_client.get_open_orders(self.market)
+        open_orders = live_client.get_open_orders(market)
         if open_orders:
             raise RuntimeError(f"미체결 주문 {len(open_orders)}개가 있어 수동매매를 차단합니다.")
 
-        orderbook = live_client.get_orderbook(self.market)
+        orderbook = live_client.get_orderbook(market)
         assert_spread_ok(orderbook.spread_pct, self.max_spread_pct)
 
-        ticker = live_client.get_ticker(self.market)
+        ticker = live_client.get_ticker(market)
         balances = live_client.get_balances()
-        base = market_base_currency(self.market)
+        base = market_base_currency(market)
         equity = balances.krw_balance + balances.get_total(base) * ticker.trade_price
         risk_state = load_risk_state(self.risk_state_path, now, equity)
         risk_report = evaluate_risk(
@@ -554,6 +578,18 @@ class ControlPanelView(discord.ui.View):
     async def scalp_1m_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self._request_profile_mode(interaction, "scalp_1m")
 
+    @discord.ui.button(label="Pulse 1s", style=discord.ButtonStyle.danger, custom_id="quant:mode:pulse10s", row=4)
+    async def pulse_10s_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._request_profile_mode(interaction, "pulse_10s")
+
+    @discord.ui.button(label="Set Market", style=discord.ButtonStyle.secondary, custom_id="quant:pulse:market", row=4)
+    async def set_market_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await self._require_admin(interaction):
+            return
+        await interaction.response.send_modal(
+            PulseMarketModal(self.controller, panel_message=interaction.message)
+        )
+
     async def _request_profile_mode(self, interaction: discord.Interaction, profile: str) -> None:
         if not await self._require_admin(interaction):
             return
@@ -567,6 +603,49 @@ class ControlPanelView(discord.ui.View):
             ),
             ephemeral=True,
         )
+
+
+class PulseMarketModal(discord.ui.Modal, title="Set Pulse Market"):
+    """Admin modal for changing the selected Pulse KRW market."""
+
+    market = discord.ui.TextInput(
+        label="KRW market",
+        placeholder="KRW-SOL",
+        max_length=20,
+    )
+
+    def __init__(
+        self,
+        controller: QuantControlController,
+        *,
+        panel_message: discord.Message,
+    ):
+        super().__init__()
+        self.controller = controller
+        self.panel_message = panel_message
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not self.controller.is_admin(interaction.user.id):
+            await interaction.response.send_message("관리자 권한이 없습니다.", ephemeral=True)
+            return
+        try:
+            market = self.controller.set_pulse_market(
+                str(self.market.value),
+                updated_by=str(interaction.user.id),
+            )
+            await interaction.response.send_message(
+                f"Pulse 시장을 `{market}`로 저장했습니다. Pulse 모드의 다음 판단부터 적용됩니다.",
+                ephemeral=True,
+            )
+            await self.panel_message.edit(
+                embed=await self.controller.build_panel_embed(),
+                view=ControlPanelView(self.controller),
+            )
+        except Exception as exc:
+            await interaction.response.send_message(
+                f"시장 변경 실패: `{type(exc).__name__}: {exc}`",
+                ephemeral=True,
+            )
 
 
 class ConfirmManualTradeView(discord.ui.View):
@@ -903,6 +982,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--risk-state-file", default="logs/eth_cash_micro_live_risk_state.json")
     parser.add_argument("--pilot-state-file", default="logs/eth_cash_micro_live_state.json")
     parser.add_argument("--profile-mode-file", default="logs/eth_cash_live_profile.json")
+    parser.add_argument("--market-mode-file", default="logs/pulse_market.json")
     parser.add_argument("--service-name", default="quant-eth-cash-live")
     parser.add_argument("--panel-state-file", default="logs/discord_control_panel_state.json")
     parser.add_argument("--max-manual-order-krw", type=Decimal, default=Decimal("25000"))
@@ -941,6 +1021,7 @@ def main() -> None:
         risk_state_path=Path(args.risk_state_file),
         pilot_state_path=Path(args.pilot_state_file),
         profile_mode_path=Path(args.profile_mode_file),
+        market_mode_path=Path(args.market_mode_file),
         service_name=args.service_name,
         admin_user_ids=parse_admin_user_ids(cfg.discord_admin_user_ids),
         max_manual_order_krw=args.max_manual_order_krw,

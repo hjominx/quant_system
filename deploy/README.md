@@ -8,16 +8,20 @@ pilot server. Secrets stay in `.env` on the server and must not be committed.
 Current pilot profile:
 
 - Strategy profile: `stable_quality`
-- Runtime modes: `stable_quality` (`4h`), `scalp_active` (`5m`), or `scalp_1m` (`1m`)
+- Runtime modes: `stable_quality` (`4h`), `scalp_active` (`5m`), `scalp_1m` (`1m`), or `pulse_10s` (`1m` ticker pulse)
 - Mode file: `logs/eth_cash_live_profile.json`
-- Loop interval: 1 minute, aligned to clock boundaries
-- Max order: 50,000 KRW
-- Max ETH position: 200,000 KRW
-- Cooldown: 10 seconds
+- Pulse market file: `logs/pulse_market.json`
+- Loop interval: 1 second
+- Max order: 100,000 KRW
+- Max selected-market position: 200,000 KRW
+- Cooldown: 0 seconds
 - Max orders per day: 300
 - Discord status: hourly, on the hour
 - Scalp modes allow controlled averaging up to 2 add-on buys per position,
   then keep hard-stop behavior if the position does not recover.
+- Pulse mode buys up to 100,000 KRW every 10 minutes on the selected KRW
+  market, starts TP/SL checks 3 seconds after each pulse buy, and uses
+  +0.30% take-profit / -0.04% stop-loss.
 
 Install or refresh the service on AWS:
 
@@ -31,7 +35,7 @@ sudo systemctl daemon-reload
 sudo systemctl restart quant-eth-cash-live
 sudo systemctl restart quant-discord-control
 
-systemctl cat quant-eth-cash-live | grep -E -- '--profile|--profile-mode-file|--max-order-krw|--max-position-krw|--cooldown-seconds|--max-orders-per-day|--interval-minutes'
+systemctl cat quant-eth-cash-live | grep -E -- '--profile|--profile-mode-file|--market-mode-file|--max-order-krw|--max-position-krw|--cooldown-seconds|--max-orders-per-day|--interval-seconds'
 journalctl -u quant-eth-cash-live -n 80 --no-pager
 ```
 
@@ -61,5 +65,13 @@ python - <<'PY'
 from pathlib import Path
 from scripts.run_eth_cash_micro_live import save_runtime_profile_mode
 save_runtime_profile_mode(Path("logs/eth_cash_live_profile.json"), "scalp_1m", updated_by="ssh")
+PY
+
+# Pulse mode on a selected KRW alt market
+python - <<'PY'
+from pathlib import Path
+from scripts.run_eth_cash_micro_live import save_runtime_market_mode, save_runtime_profile_mode
+save_runtime_market_mode(Path("logs/pulse_market.json"), "KRW-SOL", updated_by="ssh")
+save_runtime_profile_mode(Path("logs/eth_cash_live_profile.json"), "pulse_10s", updated_by="ssh")
 PY
 ```
