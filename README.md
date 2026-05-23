@@ -172,3 +172,4 @@ python scripts/run_discord_control_bot.py --no-file-log
 
 패널 기능: `Status`, `Price`, `Assets`, `Orders`, `Risk`, `Logs`, `Refresh Panel`, `Buy 5k`, `Buy 10k`, `Buy 25k`, `Sell ALL`, `Kill ON`, `Kill OFF`.
 조회 버튼은 계좌/주문 상태만 읽고, 수동매매/킬스위치 버튼은 `DISCORD_ADMIN_USER_IDS`에 등록된 사용자만 실행할 수 있습니다. 수동매매는 2단계 확인 후 LIVE 모드, 킬스위치, 미체결 주문, 스프레드, 리스크 게이트, 쿨다운/일일 한도, 포지션 한도를 모두 통과해야 실행됩니다.
+컨트롤 패널은 기본적으로 sticky 모드로 동작해 새 채널 메시지가 올라오면 기존 패널을 삭제하고 다시 게시해 하단에 유지합니다. 필요하면 `--no-sticky-panel`로 끌 수 있습니다.

@@ -615,12 +615,18 @@ class QuantControlClient(discord.Client):
         controller: QuantControlController,
         channel_id: int,
         state_file: Path,
+        sticky_panel: bool,
+        sticky_bump_delay_seconds: float,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.controller = controller
         self.channel_id = channel_id
         self.state_file = state_file
+        self.sticky_panel = sticky_panel
+        self.sticky_bump_delay_seconds = sticky_bump_delay_seconds
+        self._panel_lock = asyncio.Lock()
+        self._pending_bump_task: Optional[asyncio.Task] = None
 
     async def setup_hook(self) -> None:
         self.add_view(ControlPanelView(self.controller))
@@ -629,10 +635,33 @@ class QuantControlClient(discord.Client):
         print(f"Discord control bot logged in as {self.user}")
         await self.post_or_update_panel()
 
+    async def on_message(self, message: discord.Message) -> None:
+        """Move the control panel back to the bottom after channel activity."""
+        if not self.sticky_panel:
+            return
+        if message.channel.id != self.channel_id:
+            return
+        if self.user is not None and message.author.id == self.user.id:
+            return
+        self.schedule_panel_bump()
+
+    def schedule_panel_bump(self) -> None:
+        """Debounce panel bumps so bursts of messages only repost once."""
+        if self._pending_bump_task and not self._pending_bump_task.done():
+            self._pending_bump_task.cancel()
+        self._pending_bump_task = asyncio.create_task(self._delayed_panel_bump())
+
+    async def _delayed_panel_bump(self) -> None:
+        try:
+            await asyncio.sleep(self.sticky_bump_delay_seconds)
+            await self.bump_panel_to_bottom()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            print(f"Sticky panel bump failed: {type(exc).__name__}: {exc}")
+
     async def post_or_update_panel(self) -> None:
-        channel = self.get_channel(self.channel_id)
-        if channel is None:
-            channel = await self.fetch_channel(self.channel_id)
+        channel = await self.resolve_panel_channel()
 
         embed = await self.controller.build_panel_embed()
         view = ControlPanelView(self.controller)
@@ -649,6 +678,36 @@ class QuantControlClient(discord.Client):
         message = await channel.send(embed=embed, view=view)
         save_panel_message_id(self.state_file, message.id)
         print(f"Discord control panel posted: message_id={message.id}")
+
+    async def bump_panel_to_bottom(self) -> None:
+        """Delete the old panel and send a fresh one as the latest message."""
+        async with self._panel_lock:
+            channel = await self.resolve_panel_channel()
+            message_id = load_panel_message_id(self.state_file)
+            if message_id is not None:
+                try:
+                    message = await channel.fetch_message(message_id)
+                    await message.delete()
+                except discord.NotFound:
+                    pass
+                except discord.Forbidden:
+                    print("Sticky panel could not delete old panel: missing permission")
+                except discord.HTTPException as exc:
+                    print(f"Sticky panel could not delete old panel: {exc}")
+
+            message = await channel.send(
+                embed=await self.controller.build_panel_embed(),
+                view=ControlPanelView(self.controller),
+            )
+            save_panel_message_id(self.state_file, message.id)
+            print(f"Discord control panel bumped: message_id={message.id}")
+
+    async def resolve_panel_channel(self):
+        """Return the configured Discord text channel."""
+        channel = self.get_channel(self.channel_id)
+        if channel is None:
+            channel = await self.fetch_channel(self.channel_id)
+        return channel
 
 
 def _risk_block_summary(report) -> str:
@@ -741,6 +800,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-spread-pct", type=Decimal, default=Decimal("0.005"))
     parser.add_argument("--max-orders-per-day", type=int, default=12)
     parser.add_argument("--cooldown-minutes", type=int, default=60)
+    parser.add_argument(
+        "--no-sticky-panel",
+        action="store_true",
+        help="Do not repost the control panel after new channel messages.",
+    )
+    parser.add_argument("--sticky-bump-delay-seconds", type=float, default=2.0)
     parser.add_argument("--no-file-log", action="store_true")
     return parser.parse_args()
 
@@ -769,10 +834,14 @@ def main() -> None:
         cooldown_minutes=args.cooldown_minutes,
     )
     intents = discord.Intents.default()
+    if not args.no_sticky_panel:
+        intents.messages = True
     bot = QuantControlClient(
         controller=controller,
         channel_id=int(cfg.discord_channel_id),
         state_file=Path(args.panel_state_file),
+        sticky_panel=not args.no_sticky_panel,
+        sticky_bump_delay_seconds=args.sticky_bump_delay_seconds,
         intents=intents,
     )
     bot.run(cfg.discord_bot_token)
