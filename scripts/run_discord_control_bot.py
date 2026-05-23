@@ -107,6 +107,27 @@ def to_discord_embeds(embeds: Iterable[DiscordEmbed]) -> list[discord.Embed]:
     return [to_discord_embed(embed) for embed in embeds]
 
 
+async def respond_interaction_error(
+    interaction: discord.Interaction,
+    error: Exception,
+    *,
+    prefix: str = "상호작용 처리 실패",
+) -> None:
+    """Send an ephemeral interaction error instead of leaving Discord silent."""
+    message = f"{prefix}: `{type(error).__name__}: {error}`"
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except Exception as notify_error:
+        print(
+            "Failed to report interaction error: "
+            f"{type(notify_error).__name__}: {notify_error}"
+        )
+    print(f"{prefix}: {type(error).__name__}: {error}")
+
+
 class QuantControlController:
     """Controller backing the Discord UI buttons."""
 
@@ -421,6 +442,28 @@ class QuantControlController:
         if self.kill_switch_path.exists():
             self.kill_switch_path.unlink()
 
+    def assert_reboot_allowed(self) -> None:
+        """Fail fast if the service user cannot run passwordless sudo reboot."""
+        result = subprocess.run(
+            ["/usr/bin/sudo", "-n", "true"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=3,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "sudo permission denied").strip()
+            raise RuntimeError(f"passwordless sudo check failed: {detail}")
+
+    def launch_server_reboot(self) -> None:
+        """Request an immediate VPS reboot without waiting for the process."""
+        subprocess.Popen(
+            ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "reboot"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
 
 class ControlPanelView(discord.ui.View):
     """Persistent Discord button panel."""
@@ -428,6 +471,14 @@ class ControlPanelView(discord.ui.View):
     def __init__(self, controller: QuantControlController):
         super().__init__(timeout=None)
         self.controller = controller
+
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        item,
+    ) -> None:
+        await respond_interaction_error(interaction, error)
 
     async def _send_report(self, interaction: discord.Interaction, report: str) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -566,6 +617,16 @@ class ControlPanelView(discord.ui.View):
             ephemeral=True,
         )
 
+    @discord.ui.button(label="Reboot VPS", style=discord.ButtonStyle.primary, custom_id="quant:vps:reboot", row=3)
+    async def reboot_vps_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await self._require_admin(interaction):
+            return
+        await interaction.response.send_message(
+            "AWS VPS를 리부트할까요? 봇과 라이브 서비스가 잠시 끊겼다가 systemd로 다시 올라옵니다.",
+            view=ConfirmServerRebootView(self.controller, interaction.message),
+            ephemeral=True,
+        )
+
     @discord.ui.button(label="Stable Mode", style=discord.ButtonStyle.secondary, custom_id="quant:mode:stable", row=4)
     async def stable_mode_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self._request_profile_mode(interaction, "stable_quality")
@@ -624,6 +685,9 @@ class PulseMarketModal(discord.ui.Modal, title="Set Pulse Market"):
         self.controller = controller
         self.panel_message = panel_message
 
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        await respond_interaction_error(interaction, error, prefix="시장 변경 처리 실패")
+
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if not self.controller.is_admin(interaction.user.id):
             await interaction.response.send_message("관리자 권한이 없습니다.", ephemeral=True)
@@ -659,12 +723,20 @@ class ConfirmManualTradeView(discord.ui.View):
         amount: Optional[Decimal],
         panel_message: discord.Message,
     ):
-        super().__init__(timeout=30)
+        super().__init__(timeout=60)
         self.controller = controller
         self.action = action
         self.amount = amount
         self.panel_message = panel_message
         self.submitted = False
+
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        item,
+    ) -> None:
+        await respond_interaction_error(interaction, error, prefix="수동매매 처리 실패")
 
     @discord.ui.button(label="Confirm Manual Trade", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -709,10 +781,18 @@ class ConfirmKillSwitchOffView(discord.ui.View):
     """Two-step confirmation before removing the kill switch."""
 
     def __init__(self, controller: QuantControlController, panel_message: discord.Message):
-        super().__init__(timeout=120)
+        super().__init__(timeout=300)
         self.controller = controller
         self.panel_message = panel_message
         self.submitted = False
+
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        item,
+    ) -> None:
+        await respond_interaction_error(interaction, error, prefix="킬스위치 처리 실패")
 
     @discord.ui.button(label="Confirm Kill OFF", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -743,6 +823,59 @@ class ConfirmKillSwitchOffView(discord.ui.View):
         await interaction.response.edit_message(content="취소했습니다.", view=None)
 
 
+class ConfirmServerRebootView(discord.ui.View):
+    """Two-step confirmation before rebooting the VPS."""
+
+    def __init__(self, controller: QuantControlController, panel_message: discord.Message):
+        super().__init__(timeout=300)
+        self.controller = controller
+        self.panel_message = panel_message
+        self.submitted = False
+
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        item,
+    ) -> None:
+        await respond_interaction_error(interaction, error, prefix="VPS 리부트 처리 실패")
+
+    @discord.ui.button(label="Confirm Reboot", style=discord.ButtonStyle.primary)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not self.controller.is_admin(interaction.user.id):
+            await interaction.response.send_message("관리자 권한이 없습니다.", ephemeral=True)
+            return
+        if self.submitted:
+            await interaction.response.send_message("이미 리부트 요청을 처리 중입니다.", ephemeral=True)
+            return
+        self.submitted = True
+        for item in self.children:
+            item.disabled = True
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        try:
+            await asyncio.to_thread(self.controller.assert_reboot_allowed)
+            await interaction.followup.send(
+                "AWS VPS 리부트를 요청합니다. 약 1~2분 뒤 봇과 라이브 서비스가 다시 올라옵니다.",
+                ephemeral=True,
+            )
+            await asyncio.to_thread(self.controller.launch_server_reboot)
+        except Exception as exc:
+            self.submitted = False
+            await interaction.followup.send(
+                f"VPS 리부트 실패: `{type(exc).__name__}: {exc}`",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(content="리부트를 취소했습니다.", view=None)
+
+
 class ConfirmProfileModeView(discord.ui.View):
     """Two-step confirmation before changing the live trading profile."""
 
@@ -753,11 +886,19 @@ class ConfirmProfileModeView(discord.ui.View):
         profile: str,
         panel_message: discord.Message,
     ):
-        super().__init__(timeout=60)
+        super().__init__(timeout=300)
         self.controller = controller
         self.profile = profile
         self.panel_message = panel_message
         self.submitted = False
+
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        item,
+    ) -> None:
+        await respond_interaction_error(interaction, error, prefix="모드 전환 처리 실패")
 
     @discord.ui.button(label="Confirm Mode Switch", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
