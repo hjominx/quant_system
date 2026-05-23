@@ -814,8 +814,12 @@ def main() -> None:
     args = parse_args()
     cfg = get_config()
     setup_logging(log_level=cfg.log_level, enable_file_log=not args.no_file_log)
-    if not cfg.discord_bot_token or not cfg.discord_channel_id:
-        raise RuntimeError("DISCORD_BOT_TOKEN과 DISCORD_CHANNEL_ID가 필요합니다.")
+    control_channel_id = cfg.discord_control_target_channel_id
+    if not cfg.discord_bot_token or not control_channel_id:
+        raise RuntimeError(
+            "DISCORD_BOT_TOKEN과 DISCORD_CONTROL_CHANNEL_ID 또는 "
+            "DISCORD_CHANNEL_ID가 필요합니다."
+        )
 
     controller = QuantControlController(
         config=cfg,
@@ -838,7 +842,7 @@ def main() -> None:
         intents.messages = True
     bot = QuantControlClient(
         controller=controller,
-        channel_id=int(cfg.discord_channel_id),
+        channel_id=int(control_channel_id),
         state_file=Path(args.panel_state_file),
         sticky_panel=not args.no_sticky_panel,
         sticky_bump_delay_seconds=args.sticky_bump_delay_seconds,

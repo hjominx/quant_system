@@ -163,7 +163,7 @@ python scripts/run_discord_query_bot.py --no-file-log
 
 지원 명령: `!q status`, `!q price`, `!q assets`, `!q orders`, `!q help`
 
-버튼형 운영 패널을 쓰려면 `discord.py`를 설치하고 Bot Token, Channel ID, 관리자 Discord user ID를 `.env`에 추가한 뒤 컨트롤 봇을 실행합니다.
+버튼형 운영 패널을 쓰려면 `discord.py`를 설치하고 Bot Token, Channel ID, 관리자 Discord user ID를 `.env`에 추가한 뒤 컨트롤 봇을 실행합니다. 알림 채널과 콘솔 채널을 분리하려면 `DISCORD_CONTROL_CHANNEL_ID`에 콘솔 전용 채널 ID를 넣습니다. 이 값이 없으면 기존 `DISCORD_CHANNEL_ID`를 사용합니다.
 
 ```bash
 pip install -r requirements.txt

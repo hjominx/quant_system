@@ -29,6 +29,8 @@ def _clean_env():
         'DAILY_LOSS_LIMIT', 'WEEKLY_LOSS_LIMIT', 'MAX_DRAWDOWN_LIMIT',
         'MAX_POSITION_PER_COIN', 'MAX_TOTAL_CRYPTO', 'INITIAL_CAPITAL',
         'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'DISCORD_WEBHOOK_URL', 'LOG_LEVEL',
+        'DISCORD_BOT_TOKEN', 'DISCORD_CHANNEL_ID', 'DISCORD_CONTROL_CHANNEL_ID',
+        'DISCORD_COMMAND_PREFIX', 'DISCORD_ADMIN_USER_IDS',
     ]
     for key in keys_to_clean:
         os.environ.pop(key, None)
@@ -61,6 +63,9 @@ MAX_DRAWDOWN_LIMIT=0.15
 MAX_POSITION_PER_COIN=0.25
 MAX_TOTAL_CRYPTO=0.80
 INITIAL_CAPITAL=10000000
+DISCORD_BOT_TOKEN=test_discord_bot_token_1234567890
+DISCORD_CHANNEL_ID=111111111111111111
+DISCORD_CONTROL_CHANNEL_ID=222222222222222222
 LOG_LEVEL=INFO
 """
     env_path = _write_temp_env(env_content)
@@ -72,6 +77,8 @@ LOG_LEVEL=INFO
         assert cfg.trading_mode == TradingMode.DEVELOPMENT
         assert cfg.daily_loss_limit == 0.03
         assert cfg.is_live_trading is False
+        assert cfg.discord_channel_id == "111111111111111111"
+        assert cfg.discord_control_target_channel_id == "222222222222222222"
         
         print("  ✓ 모든 값 정상 로드")
         print(f"  ✓ 거래 모드: {cfg.trading_mode.value}")

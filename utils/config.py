@@ -148,6 +148,7 @@ class Config:
     discord_webhook_url: Optional[str] = field(default=None, repr=False)
     discord_bot_token: Optional[str] = field(default=None, repr=False)
     discord_channel_id: Optional[str] = None
+    discord_control_channel_id: Optional[str] = None
     discord_command_prefix: str = "!q"
     discord_admin_user_ids: Optional[str] = field(default=None, repr=False)
     
@@ -197,6 +198,11 @@ class Config:
     def should_dry_run_orders(self) -> bool:
         """주문을 실제로 보내면 안 되는 모드인지 여부"""
         return not self.is_live_trading
+
+    @property
+    def discord_control_target_channel_id(self) -> Optional[str]:
+        """Discord control panel channel, falling back to the query channel."""
+        return self.discord_control_channel_id or self.discord_channel_id
     
     def mask_secret(self, value: str) -> str:
         """로그·디스플레이용 시크릿 마스킹
@@ -232,6 +238,7 @@ API 키:           {self.mask_secret(self.bithumb_api_key)}
 텔레그램:         {'설정됨' if self.telegram_bot_token else '미설정'}
 디스코드:         {'설정됨' if self.discord_webhook_url else '미설정'}
 디스코드 조회봇:   {'설정됨' if self.discord_bot_token and self.discord_channel_id else '미설정'}
+디스코드 컨트롤봇: {'설정됨' if self.discord_bot_token and self.discord_control_target_channel_id else '미설정'}
 디스코드 관리자:   {'설정됨' if self.discord_admin_user_ids else '미설정'}
 
 [로깅]
@@ -295,6 +302,7 @@ def get_config(env_file: Optional[Path] = None, force_reload: bool = False) -> C
         discord_webhook_url=_get_env("DISCORD_WEBHOOK_URL", secret=True),
         discord_bot_token=_get_env("DISCORD_BOT_TOKEN", secret=True),
         discord_channel_id=_get_env("DISCORD_CHANNEL_ID"),
+        discord_control_channel_id=_get_env("DISCORD_CONTROL_CHANNEL_ID"),
         discord_command_prefix=_get_env("DISCORD_COMMAND_PREFIX", default="!q") or "!q",
         discord_admin_user_ids=_get_env("DISCORD_ADMIN_USER_IDS", secret=True),
         log_level=_get_env("LOG_LEVEL", default="INFO"),
