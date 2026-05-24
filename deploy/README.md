@@ -12,6 +12,9 @@ Current pilot profile:
 - Mode file: `logs/eth_cash_live_profile.json`
 - Pulse market file: `logs/pulse_market.json`
 - Auto-trade start file: `logs/AUTO_TRADE_ENABLED`
+- Force-start file: `logs/REBATE_MICRO_FORCE_START.json`
+- Rebate Micro turnover file: `logs/rebate_micro_turnover.json`
+- Rebate Micro turnover target: 100,000,000,000 KRW
 - Loop interval: 1 second
 - Max order: 100,000 KRW
 - Max selected-market position: 200,000 KRW
@@ -27,6 +30,11 @@ Current pilot profile:
   It attempts continuous selected-market micro entries with +0.01%
   take-profit and -0.02% stop-loss, while still respecting spread, risk,
   kill switch, open-order, position, and daily order gates.
+- The Discord `Recommend` button scans KRW markets by liquidity, spread, 1m
+  short volatility, momentum/reversal signal, and estimated post-cost edge.
+  Candidate buttons can start the selected market normally or with a
+  time-limited loss-limit override. The override never bypasses the kill
+  switch, spread, open-order, balance, position, or daily order-count gates.
 
 Install or refresh the service on AWS:
 
@@ -40,7 +48,7 @@ sudo systemctl daemon-reload
 sudo systemctl restart quant-eth-cash-live
 sudo systemctl restart quant-discord-control
 
-systemctl cat quant-eth-cash-live | grep -E -- '--profile|--profile-mode-file|--market-mode-file|--auto-trade-file|--max-order-krw|--max-position-krw|--cooldown-seconds|--max-orders-per-day|--interval-seconds'
+systemctl cat quant-eth-cash-live | grep -E -- '--profile|--profile-mode-file|--market-mode-file|--auto-trade-file|--force-start-file|--turnover-file|--max-order-krw|--max-position-krw|--cooldown-seconds|--max-orders-per-day|--interval-seconds'
 journalctl -u quant-eth-cash-live -n 80 --no-pager
 ```
 
@@ -89,6 +97,40 @@ save_runtime_profile_mode(Path("logs/eth_cash_live_profile.json"), "rebate_micro
 enable_auto_trade(Path("logs/AUTO_TRADE_ENABLED"), profile="rebate_micro", updated_by="ssh")
 PY
 
+# Force-start Rebate Micro on a selected KRW alt market for 60 minutes
+python - <<'PY'
+from pathlib import Path
+from scripts.run_eth_cash_micro_live import (
+    enable_auto_trade,
+    enable_risk_override,
+    save_runtime_market_mode,
+    save_runtime_profile_mode,
+)
+market = "KRW-SOL"
+save_runtime_market_mode(Path("logs/pulse_market.json"), market, updated_by="ssh")
+save_runtime_profile_mode(Path("logs/eth_cash_live_profile.json"), "rebate_micro", updated_by="ssh")
+enable_auto_trade(Path("logs/AUTO_TRADE_ENABLED"), profile="rebate_micro", updated_by="ssh")
+enable_risk_override(
+    Path("logs/REBATE_MICRO_FORCE_START.json"),
+    profile="rebate_micro",
+    market=market,
+    updated_by="ssh",
+    minutes=60,
+)
+PY
+
 # Stop Rebate Micro without forcing liquidation
-rm -f logs/AUTO_TRADE_ENABLED
+rm -f logs/AUTO_TRADE_ENABLED logs/REBATE_MICRO_FORCE_START.json
+
+# Show Rebate Micro turnover progress
+python - <<'PY'
+from pathlib import Path
+from scripts.run_eth_cash_micro_live import (
+    format_rebate_turnover_progress,
+    load_rebate_turnover_progress,
+)
+print(format_rebate_turnover_progress(
+    load_rebate_turnover_progress(Path("logs/rebate_micro_turnover.json"))
+))
+PY
 ```

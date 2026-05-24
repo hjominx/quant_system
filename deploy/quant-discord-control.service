@@ -8,7 +8,7 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/quant_system
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/ubuntu/quant_system/venv/bin/python -B /home/ubuntu/quant_system/scripts/run_discord_control_bot.py --profile-mode-file logs/eth_cash_live_profile.json --market-mode-file logs/pulse_market.json --auto-trade-file logs/AUTO_TRADE_ENABLED --max-manual-order-krw 50000 --max-position-krw 200000 --max-orders-per-day 300 --cooldown-seconds 0 --no-file-log
+ExecStart=/home/ubuntu/quant_system/venv/bin/python -B /home/ubuntu/quant_system/scripts/run_discord_control_bot.py --profile-mode-file logs/eth_cash_live_profile.json --market-mode-file logs/pulse_market.json --auto-trade-file logs/AUTO_TRADE_ENABLED --force-start-file logs/REBATE_MICRO_FORCE_START.json --turnover-file logs/rebate_micro_turnover.json --turnover-target-krw 100000000000 --force-start-minutes 60 --max-manual-order-krw 50000 --max-position-krw 200000 --max-orders-per-day 300 --cooldown-seconds 0 --no-file-log
 Restart=always
 RestartSec=10
 

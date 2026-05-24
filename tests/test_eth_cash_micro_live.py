@@ -5,6 +5,7 @@ The tests focus on pure safety gates and do not call Bithumb.
 """
 from decimal import Decimal
 from datetime import datetime, timedelta
+import json
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -37,15 +38,23 @@ from scripts.run_eth_cash_micro_live import (
     calculate_sell_volume,
     clock_status_alert_due,
     disable_auto_trade,
+    disable_risk_override,
     enable_auto_trade,
+    enable_risk_override,
+    estimate_order_notional,
+    format_rebate_turnover_progress,
     format_sleep_wait,
     format_cooldown,
+    load_rebate_turnover_progress,
     load_runtime_market_mode,
     load_runtime_profile_mode,
     normalize_krw_market,
     record_order,
+    record_rebate_turnover,
     record_status_alert,
     resolve_runtime_profile,
+    risk_override_allows,
+    risk_override_enabled,
     save_runtime_market_mode,
     save_runtime_profile_mode,
     status_alert_due,
@@ -424,8 +433,112 @@ def test_auto_trade_start_stop_flag():
     print("  ✓ Start Micro/Stop Micro 플래그 저장과 해제 정상")
 
 
+def test_rebate_micro_force_start_flag_is_scoped_and_expiring():
+    print("\n[테스트 17] Rebate Micro 강제시작 플래그")
+    print("-" * 60)
+
+    now = datetime(2026, 5, 22, 9, 0, 0)
+    with TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "force.json"
+        assert risk_override_enabled(path, profile="rebate_micro", market="KRW-SOL", now=now) is False
+        enable_risk_override(
+            path,
+            profile="rebate_micro",
+            market="krw-sol",
+            updated_by="test",
+            minutes=30,
+        )
+        expires_at = datetime.fromisoformat(json.loads(path.read_text())["expires_at"])
+        assert risk_override_enabled(path, profile="rebate_micro", market="KRW-SOL", now=now) is True
+        assert risk_override_enabled(path, profile="rebate_micro", market="KRW-XRP", now=now) is False
+        assert risk_override_enabled(
+            path,
+            profile="rebate_micro",
+            market="KRW-SOL",
+            now=expires_at + timedelta(seconds=1),
+        ) is False
+        disable_risk_override(path)
+        assert risk_override_enabled(path, profile="rebate_micro", market="KRW-SOL", now=now) is False
+
+    print("  ✓ 강제시작은 rebate_micro/선택마켓/만료시간 범위 안에서만 활성")
+
+
+def test_rebate_micro_risk_override_never_bypasses_kill_switch():
+    print("\n[테스트 18] Rebate Micro 강제시작 위험범위")
+    print("-" * 60)
+
+    now = datetime(2026, 5, 22, 9, 0, 0)
+    limits = RiskLimits(
+        daily_loss_limit=Decimal("0.03"),
+        weekly_loss_limit=Decimal("0.07"),
+        max_drawdown_limit=Decimal("0.15"),
+    )
+    state = RiskState(
+        date=now.date().isoformat(),
+        iso_week=iso_week_key(now),
+        day_start_equity=Decimal("100000"),
+        week_start_equity=Decimal("100000"),
+        peak_equity=Decimal("100000"),
+        kill_switch=False,
+    )
+    report = evaluate_risk(
+        state=state,
+        equity=Decimal("90000"),
+        limits=limits,
+        kill_switch_file_active=False,
+    )
+    assert report.daily_breached is True
+    assert risk_override_allows(report) is True
+
+    killed = evaluate_risk(
+        state=state,
+        equity=Decimal("90000"),
+        limits=limits,
+        kill_switch_file_active=True,
+    )
+    assert risk_override_allows(killed) is False
+
+    print("  ✓ 강제시작은 손실 제한만 우회하고 킬스위치는 우회하지 않음")
+
+
+def test_rebate_micro_turnover_progress_records_notional():
+    print("\n[테스트 19] Rebate Micro 거래대금 진행률")
+    print("-" * 60)
+
+    now = datetime(2026, 5, 22, 9, 0, 0)
+    with TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "turnover.json"
+        progress = load_rebate_turnover_progress(path, target_krw=Decimal("100000000000"))
+        assert progress.total_krw == 0
+
+        progress = record_rebate_turnover(
+            path,
+            notional_krw=Decimal("100000"),
+            market="KRW-SOL",
+            now=now,
+            target_krw=Decimal("100000000000"),
+        )
+        assert progress.total_krw == Decimal("100000")
+        assert progress.orders == 1
+        assert "100,000" in format_rebate_turnover_progress(progress)
+
+        plan = build_pilot_plan(
+            decision=TradeDecision(signal=Signal.SELL, target_weight=0.0, reason="test"),
+            balances=make_balances(krw="0", eth="0.05"),
+            trade_price=Decimal("3000000"),
+            market="KRW-ETH",
+            max_order_krw=Decimal("100000"),
+            max_position_krw=Decimal("200000"),
+            min_order_krw=Decimal("5000"),
+            dry_run=False,
+        )
+        assert estimate_order_notional(plan, Decimal("3000000")) == Decimal("150000")
+
+    print("  ✓ 주문 추정 거래대금을 누적하고 1000억 목표 대비 진행률을 표시")
+
+
 def test_order_quota_blocks_cooldown_and_daily_limit():
-    print("\n[테스트 17] 주문 쿨다운/일일 한도")
+    print("\n[테스트 20] 주문 쿨다운/일일 한도")
     print("-" * 60)
 
     now = datetime(2026, 5, 22, 9, 0, 0)
@@ -833,6 +946,9 @@ def main():
         test_runtime_selectable_market_file_switches_alt_market,
         test_profile_market_validation_keeps_non_pulse_eth_only,
         test_auto_trade_start_stop_flag,
+        test_rebate_micro_force_start_flag_is_scoped_and_expiring,
+        test_rebate_micro_risk_override_never_bypasses_kill_switch,
+        test_rebate_micro_turnover_progress_records_notional,
         test_order_quota_blocks_cooldown_and_daily_limit,
         test_order_quota_supports_second_cooldown,
         test_record_order_tracks_averaging_count,

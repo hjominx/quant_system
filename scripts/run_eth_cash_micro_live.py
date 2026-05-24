@@ -137,6 +137,16 @@ class RuntimeProfile:
     market_source: str
 
 
+@dataclass(frozen=True)
+class RebateTurnoverProgress:
+    """Persistent turnover progress for the Rebate Micro pilot."""
+    total_krw: Decimal = Decimal("0")
+    target_krw: Decimal = Decimal("100000000000")
+    orders: int = 0
+    last_order_at: Optional[str] = None
+    last_market: Optional[str] = None
+
+
 def strategy_params_for_profile(profile: str) -> dict:
     """Return strategy parameters for a named live-trading profile."""
     if profile == "daily":
@@ -447,6 +457,143 @@ def disable_auto_trade(path: Path) -> None:
     """Disable start/stop controlled auto-trading."""
     if path.exists():
         path.unlink()
+
+
+def enable_risk_override(
+    path: Path,
+    *,
+    profile: str,
+    market: str,
+    updated_by: str = "local",
+    minutes: int = 60,
+) -> None:
+    """Enable a time-limited Rebate Micro override for loss-limit gates only."""
+    if profile != "rebate_micro":
+        raise ValueError(f"risk override는 rebate_micro 전용입니다: {profile}")
+    if minutes <= 0:
+        raise ValueError("risk override minutes must be positive")
+    now = datetime.now()
+    payload = {
+        "enabled": True,
+        "profile": profile,
+        "market": normalize_krw_market(market),
+        "updated_by": updated_by,
+        "updated_at": now.isoformat(timespec="seconds"),
+        "expires_at": (now + timedelta(minutes=minutes)).isoformat(timespec="seconds"),
+        "scope": "daily_weekly_mdd_only",
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def disable_risk_override(path: Path) -> None:
+    """Disable the Rebate Micro loss-limit override."""
+    if path.exists():
+        path.unlink()
+
+
+def risk_override_enabled(path: Path, *, profile: str, market: str, now: datetime) -> bool:
+    """Return whether a Rebate Micro loss-limit override is active."""
+    if profile != "rebate_micro" or not path.exists():
+        return False
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not raw.get("enabled"):
+            return False
+        if raw.get("profile") != profile:
+            return False
+        override_market = raw.get("market")
+        if override_market and normalize_krw_market(str(override_market)) != normalize_krw_market(market):
+            return False
+        expires_at = raw.get("expires_at")
+        if expires_at and now >= datetime.fromisoformat(str(expires_at)):
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def risk_override_allows(report) -> bool:
+    """Loss-limit override never bypasses the kill switch."""
+    if report.kill_switch_active:
+        return False
+    return bool(report.daily_breached or report.weekly_breached or report.drawdown_breached)
+
+
+def load_rebate_turnover_progress(
+    path: Path,
+    *,
+    target_krw: Decimal = Decimal("100000000000"),
+) -> RebateTurnoverProgress:
+    """Load persistent Rebate Micro turnover progress."""
+    if not path.exists():
+        return RebateTurnoverProgress(target_krw=target_krw)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return RebateTurnoverProgress(
+            total_krw=Decimal(str(raw.get("total_krw", "0"))),
+            target_krw=Decimal(str(raw.get("target_krw", str(target_krw)))),
+            orders=int(raw.get("orders", 0)),
+            last_order_at=raw.get("last_order_at"),
+            last_market=raw.get("last_market"),
+        )
+    except Exception:
+        return RebateTurnoverProgress(target_krw=target_krw)
+
+
+def save_rebate_turnover_progress(path: Path, progress: RebateTurnoverProgress) -> None:
+    """Persist Rebate Micro turnover progress."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "total_krw": str(quantize_krw(progress.total_krw)),
+        "target_krw": str(quantize_krw(progress.target_krw)),
+        "orders": progress.orders,
+        "last_order_at": progress.last_order_at,
+        "last_market": progress.last_market,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def record_rebate_turnover(
+    path: Path,
+    *,
+    notional_krw: Decimal,
+    market: str,
+    now: datetime,
+    target_krw: Decimal = Decimal("100000000000"),
+) -> RebateTurnoverProgress:
+    """Add one Rebate Micro order's approximate notional to progress."""
+    progress = load_rebate_turnover_progress(path, target_krw=target_krw)
+    updated = RebateTurnoverProgress(
+        total_krw=progress.total_krw + max(notional_krw, Decimal("0")),
+        target_krw=target_krw,
+        orders=progress.orders + 1,
+        last_order_at=now.isoformat(timespec="seconds"),
+        last_market=market,
+    )
+    save_rebate_turnover_progress(path, updated)
+    return updated
+
+
+def format_rebate_turnover_progress(progress: RebateTurnoverProgress) -> str:
+    """Format turnover progress against the configured target."""
+    pct = (
+        Decimal("0") if progress.target_krw <= 0
+        else progress.total_krw / progress.target_krw * Decimal("100")
+    )
+    return (
+        f"{quantize_krw(progress.total_krw):,} / "
+        f"{quantize_krw(progress.target_krw):,} KRW ({pct:.4f}%)"
+    )
+
+
+def estimate_order_notional(plan: PilotPlan, trade_price: Decimal) -> Decimal:
+    """Estimate KRW turnover from a submitted market order plan."""
+    if plan.krw_amount > 0:
+        return plan.krw_amount
+    if plan.volume > 0:
+        return quantize_krw(plan.volume * trade_price)
+    return Decimal("0")
 
 
 def resolve_runtime_profile(
@@ -911,6 +1058,22 @@ def parse_args() -> argparse.Namespace:
         default="logs/AUTO_TRADE_ENABLED",
         help="Start/stop flag for start-button controlled strategies such as rebate_micro.",
     )
+    parser.add_argument(
+        "--force-start-file",
+        default="logs/REBATE_MICRO_FORCE_START.json",
+        help="Time-limited Rebate Micro override for daily/weekly/MDD loss-limit gates.",
+    )
+    parser.add_argument(
+        "--turnover-file",
+        default="logs/rebate_micro_turnover.json",
+        help="Persistent Rebate Micro turnover progress file.",
+    )
+    parser.add_argument(
+        "--turnover-target-krw",
+        type=parse_decimal,
+        default=Decimal("100000000000"),
+        help="Turnover progress target for Rebate Micro reporting.",
+    )
     parser.add_argument("--live", action="store_true", help="Send real orders. Requires TRADING_MODE=LIVE.")
     parser.add_argument("--yes-i-understand-risk", action="store_true")
     parser.add_argument("--notify-dry-run", action="store_true", help="Send Discord alerts for dry-run orders/errors.")
@@ -972,6 +1135,8 @@ def print_banner(args: argparse.Namespace, dry_run: bool) -> None:
     print(f"profile_mode_file={args.profile_mode_file}")
     print(f"market_mode_file={args.market_mode_file}")
     print(f"auto_trade_file={args.auto_trade_file}")
+    print(f"force_start_file={args.force_start_file}")
+    print(f"turnover_file={args.turnover_file} target={args.turnover_target_krw:,} KRW")
 
 
 def notify_safely(
@@ -1298,6 +1463,12 @@ def run_cycle(
         limits=risk_limits,
         kill_switch_file_active=kill_switch_path.exists(),
     )
+    loss_limit_override = risk_override_enabled(
+        Path(args.force_start_file),
+        profile=runtime_profile.profile,
+        market=market,
+        now=now,
+    )
 
     ctx = build_strategy_context(
         market=market,
@@ -1361,6 +1532,13 @@ def run_cycle(
         print(f"마지막 micro 매수: {state.last_pulse_buy_at or '없음'}")
     if start_stop_required:
         print(f"자동거래: {'enabled' if start_stop_enabled else 'stopped'}")
+    if runtime_profile.profile == "rebate_micro":
+        progress = load_rebate_turnover_progress(
+            Path(args.turnover_file),
+            target_krw=args.turnover_target_krw,
+        )
+        print(f"거래대금 진행률: {format_rebate_turnover_progress(progress)}")
+        print(f"손실제한 강제시작: {'active' if loss_limit_override else 'inactive'}")
 
     print("\n[위험 게이트]")
     print(f"계좌 평가액: {quantize_krw(risk_report.equity):,} KRW")
@@ -1414,18 +1592,25 @@ def run_cycle(
         try:
             assert_risk_allows_action(plan.action, risk_report)
         except RiskGateError as exc:
-            notify_safely(
-                notifier=notifier,
-                embed=build_risk_block_alert_embed(
-                    action=plan.action,
-                    error=exc,
-                    equity=risk_report.equity,
+            if (
+                runtime_profile.profile == "rebate_micro" and
+                loss_limit_override and
+                risk_override_allows(risk_report)
+            ):
+                print(f"\n[주의] Rebate Micro force start가 손실 제한 게이트를 우회합니다: {exc}")
+            else:
+                notify_safely(
+                    notifier=notifier,
+                    embed=build_risk_block_alert_embed(
+                        action=plan.action,
+                        error=exc,
+                        equity=risk_report.equity,
+                        dry_run=dry_run,
+                    ),
                     dry_run=dry_run,
-                ),
-                dry_run=dry_run,
-                notify_dry_run=args.notify_dry_run,
-            )
-            raise
+                    notify_dry_run=args.notify_dry_run,
+                )
+                raise
         if not dry_run:
             assert_order_quota(
                 state=state,
@@ -1459,6 +1644,15 @@ def run_cycle(
                 ),
             ),
         )
+        if runtime_profile.profile == "rebate_micro":
+            progress = record_rebate_turnover(
+                Path(args.turnover_file),
+                notional_krw=estimate_order_notional(plan, ticker.trade_price),
+                market=market,
+                now=now,
+                target_krw=args.turnover_target_krw,
+            )
+            print(f"거래대금 진행률 업데이트: {format_rebate_turnover_progress(progress)}")
     notify_safely(
         notifier=notifier,
         embed=build_order_alert_embed(

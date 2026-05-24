@@ -135,6 +135,7 @@ ETH/Cash Regime은 2024년 말 이후 ETH 단순보유가 크게 흔들린 구�
 - `--profile stable_quality`는 4시간봉 방어형 적응 알파, `--profile scalp_active`는 5분봉 스캘핑, `--profile scalp_1m`은 1분봉 초공격 스캘핑 파일럿
 - `--profile pulse_10s`는 선택한 KRW 알트 마켓에서 1초마다 판단하고, 10분마다 최대 100,000원 pulse 매수를 시작하며, 매수 3초 후부터 +0.30% 익절 / -0.04% 손절을 감시
 - `--profile rebate_micro`는 선택한 KRW 알트 마켓에서 시작/중지 버튼으로만 켜지는 초단기 모델이며, 자동 반복 진입 후 +0.01% 익절 / -0.02% 손절을 감시
+- Rebate Micro의 `Recommend` 버튼은 유동성, 호가 스프레드, 1분봉 단기 변동성, 모멘텀/반전 신호, 비용 이후 기대값을 점수화해 후보를 띄우고, 선택한 종목에서만 자동매매를 시작
 - Discord 컨트롤 봇은 `logs/eth_cash_live_profile.json`을 바꿔 Stable/Scalp 5m/Scalp 1m/Pulse/Rebate Micro 모드를 다음 사이클부터 전환하고, 선택형 시장은 `logs/pulse_market.json` 또는 `Set Market` 버튼으로 변경
 - 스캘핑 모드는 손실 중에도 추세/변동성/RSI 조건이 살아 있으면 최대 2회까지만 제한 추매하고, 평균단가 기준 익절과 하드 손절을 유지
 - 계좌 위험 게이트가 일일 손실, 주간 손실, MDD, 킬스위치 파일(`logs/KILL_SWITCH_ACTIVE`)을 주문 직전에 강제
@@ -175,9 +176,11 @@ pip install -r requirements.txt
 python scripts/run_discord_control_bot.py --no-file-log
 ```
 
-패널 기능: `Status`, `Price`, `Assets`, `Orders`, `Risk`, `Logs`, `Refresh Panel`, `Buy 5k`, `Buy 10k`, `Buy 25k`, `Sell ALL`, `Kill ON`, `Kill OFF`, `Reboot VPS`, `Start Micro`, `Stop Micro`, `Stable Mode`, `Scalp 5m`, `Scalp 1m`, `Pulse 1s`, `Set Market`.
+패널 기능: `Status`, `Price`, `Assets`, `Orders`, `Risk`, `Logs`, `Recommend`, `Progress`, `Refresh Panel`, `Buy 5k`, `Buy 10k`, `Buy 25k`, `Sell ALL`, `Kill ON`, `Kill OFF`, `Reboot VPS`, `Start Micro`, `Stop Micro`, `Stable Mode`, `Scalp 5m`, `Scalp 1m`, `Pulse 1s`, `Set Market`.
 조회 버튼은 계좌/주문 상태만 읽고, 수동매매/킬스위치 버튼은 `DISCORD_ADMIN_USER_IDS`에 등록된 사용자만 실행할 수 있습니다. 수동매매는 2단계 확인 후 LIVE 모드, 킬스위치, 미체결 주문, 스프레드, 리스크 게이트, 쿨다운/일일 한도, 포지션 한도를 모두 통과해야 실행됩니다.
 `Start Micro`는 2단계 확인 후 `rebate_micro` 프로필로 전환하고 `logs/AUTO_TRADE_ENABLED`를 생성합니다. `Stop Micro`는 이 파일을 삭제해 자동 주문을 중지하지만 보유 자산을 강제매도하지 않습니다.
+`Recommend`에서 후보를 선택하면 일반 `Start` 또는 손실 제한 한시 우회용 `Force Start`를 고를 수 있습니다. `Force Start`는 일일/주간/MDD 손실 제한만 우회하며, 킬스위치, 스프레드, 미체결 주문, 잔고, 포지션, 일일 주문 횟수 한도는 우회하지 않습니다.
+`Progress`와 `Stop Micro`는 `logs/rebate_micro_turnover.json`에 저장된 Rebate Micro 누적 거래대금을 1000억 목표 대비로 표시합니다.
 `Reboot VPS`는 관리자 전용 2단계 확인 후 `sudo -n systemctl reboot`를 실행합니다. AWS 기본 `ubuntu` 사용자처럼 passwordless sudo가 가능한 서버에서만 동작합니다.
 컨트롤 패널은 기본적으로 sticky 모드로 동작해 새 채널 메시지가 올라오면 기존 패널을 삭제하고 다시 게시해 하단에 유지합니다. 필요하면 `--no-sticky-panel`로 끌 수 있습니다.
 

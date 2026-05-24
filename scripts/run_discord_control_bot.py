@@ -56,8 +56,12 @@ from scripts.run_eth_cash_micro_live import (
     calculate_sell_volume,
     default_timeframe_for_profile,
     disable_auto_trade,
+    disable_risk_override,
     enable_auto_trade,
+    enable_risk_override,
+    format_rebate_turnover_progress,
     auto_trade_enabled,
+    load_rebate_turnover_progress,
     load_pilot_state,
     load_runtime_market_mode,
     load_runtime_profile_mode,
@@ -67,6 +71,11 @@ from scripts.run_eth_cash_micro_live import (
     save_runtime_profile_mode,
     save_runtime_market_mode,
     save_pilot_state,
+)
+from strategies.rebate_market_scanner import (
+    RebateMarketCandidate,
+    format_candidate_lines,
+    scan_rebate_micro_candidates,
 )
 from utils.config import get_config
 from utils.logger import setup_logging
@@ -146,6 +155,8 @@ class QuantControlController:
         profile_mode_path: Path,
         market_mode_path: Path,
         auto_trade_path: Path,
+        force_start_path: Path,
+        turnover_path: Path,
         service_name: str,
         admin_user_ids: set[str],
         max_manual_order_krw: Decimal,
@@ -155,6 +166,15 @@ class QuantControlController:
         max_orders_per_day: int,
         cooldown_minutes: int,
         cooldown_seconds: Optional[int],
+        force_start_minutes: int,
+        turnover_target_krw: Decimal,
+        scanner_min_liquidity_krw: Decimal,
+        scanner_max_spread_pct: Decimal,
+        scanner_min_volatility_pct: Decimal,
+        scanner_fee_round_trip_pct: Decimal,
+        scanner_rebate_round_trip_pct: Decimal,
+        scanner_slippage_buffer_pct: Decimal,
+        scanner_prefilter_limit: int,
     ):
         self.config = config
         self.market = market
@@ -165,6 +185,8 @@ class QuantControlController:
         self.profile_mode_path = profile_mode_path
         self.market_mode_path = market_mode_path
         self.auto_trade_path = auto_trade_path
+        self.force_start_path = force_start_path
+        self.turnover_path = turnover_path
         self.service_name = service_name
         self.admin_user_ids = admin_user_ids
         self.max_manual_order_krw = max_manual_order_krw
@@ -174,6 +196,15 @@ class QuantControlController:
         self.max_orders_per_day = max_orders_per_day
         self.cooldown_minutes = cooldown_minutes
         self.cooldown_seconds = cooldown_seconds
+        self.force_start_minutes = force_start_minutes
+        self.turnover_target_krw = turnover_target_krw
+        self.scanner_min_liquidity_krw = scanner_min_liquidity_krw
+        self.scanner_max_spread_pct = scanner_max_spread_pct
+        self.scanner_min_volatility_pct = scanner_min_volatility_pct
+        self.scanner_fee_round_trip_pct = scanner_fee_round_trip_pct
+        self.scanner_rebate_round_trip_pct = scanner_rebate_round_trip_pct
+        self.scanner_slippage_buffer_pct = scanner_slippage_buffer_pct
+        self.scanner_prefilter_limit = scanner_prefilter_limit
         self.client = BithumbClient.from_config(
             config,
             dry_run=True,
@@ -209,8 +240,20 @@ class QuantControlController:
         """Return start/stop controlled micro-trader state."""
         return "enabled" if auto_trade_enabled(self.auto_trade_path) else "stopped"
 
-    def start_micro_trader(self, *, updated_by: str) -> None:
+    def start_micro_trader(
+        self,
+        *,
+        updated_by: str,
+        market: Optional[str] = None,
+        force_loss_limits: bool = False,
+    ) -> str:
         """Switch to rebate_micro and enable start/stop controlled trading."""
+        selected_market = self.current_market_mode() if market is None else normalize_krw_market(market)
+        save_runtime_market_mode(
+            self.market_mode_path,
+            selected_market,
+            updated_by=updated_by,
+        )
         save_runtime_profile_mode(
             self.profile_mode_path,
             "rebate_micro",
@@ -221,10 +264,45 @@ class QuantControlController:
             profile="rebate_micro",
             updated_by=updated_by,
         )
+        if force_loss_limits:
+            enable_risk_override(
+                self.force_start_path,
+                profile="rebate_micro",
+                market=selected_market,
+                updated_by=updated_by,
+                minutes=self.force_start_minutes,
+            )
+        else:
+            disable_risk_override(self.force_start_path)
+        return selected_market
 
     def stop_micro_trader(self) -> None:
         """Stop start/stop controlled micro trading without forcing liquidation."""
         disable_auto_trade(self.auto_trade_path)
+        disable_risk_override(self.force_start_path)
+
+    def rebate_turnover_progress_text(self) -> str:
+        """Return formatted Rebate Micro turnover progress."""
+        progress = load_rebate_turnover_progress(
+            self.turnover_path,
+            target_krw=self.turnover_target_krw,
+        )
+        return format_rebate_turnover_progress(progress)
+
+    async def recommend_rebate_markets(self) -> list[RebateMarketCandidate]:
+        """Scan live Bithumb markets and return Rebate Micro candidates."""
+        async with self.lock:
+            return await asyncio.to_thread(
+                scan_rebate_micro_candidates,
+                self.client,
+                min_liquidity_krw=self.scanner_min_liquidity_krw,
+                max_spread_pct=self.scanner_max_spread_pct,
+                min_volatility_pct=self.scanner_min_volatility_pct,
+                fee_round_trip_pct=self.scanner_fee_round_trip_pct,
+                rebate_round_trip_pct=self.scanner_rebate_round_trip_pct,
+                slippage_buffer_pct=self.scanner_slippage_buffer_pct,
+                prefilter_limit=self.scanner_prefilter_limit,
+            )
 
     async def collect_snapshot_embeds(self, report: str) -> list[discord.Embed]:
         """Collect Bithumb account state and convert it to Discord embeds."""
@@ -300,6 +378,7 @@ class QuantControlController:
         profile = self.current_profile_mode()
         timeframe = default_timeframe_for_profile(profile)
         market = self.current_market_mode()
+        force_state = "active" if self.force_start_path.exists() else "inactive"
         color = COLOR_DANGER if self.kill_switch_path.exists() else COLOR_INFO
         admin_state = (
             f"{len(self.admin_user_ids)} admin id(s)"
@@ -319,6 +398,8 @@ class QuantControlController:
                 DiscordField("Live service", service_state),
                 DiscordField("Kill switch", kill_state),
                 DiscordField("Micro auto", self.micro_auto_state()),
+                DiscordField("Force loss gate", force_state),
+                DiscordField("Turnover", self.rebate_turnover_progress_text(), inline=False),
                 DiscordField("Manual max", f"{format_krw(self.max_manual_order_krw)} KRW/order"),
                 DiscordField("Alerts", "Hourly status + order/risk/error webhooks"),
                 DiscordField("Admin gate", admin_state),
@@ -571,6 +652,36 @@ class ControlPanelView(discord.ui.View):
             ephemeral=True,
         )
 
+    @discord.ui.button(label="Recommend", style=discord.ButtonStyle.primary, custom_id="quant:micro:recommend", row=1)
+    async def recommend_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await self._require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            candidates = await self.controller.recommend_rebate_markets()
+            embed = build_rebate_recommendation_embed(candidates)
+            await interaction.followup.send(
+                embed=embed,
+                view=RebateRecommendationView(
+                    self.controller,
+                    candidates=candidates,
+                    panel_message=interaction.message,
+                ) if candidates else None,
+                ephemeral=True,
+            )
+        except Exception as exc:
+            await interaction.followup.send(
+                f"종목 추천 실패: `{type(exc).__name__}: {exc}`",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(label="Progress", style=discord.ButtonStyle.secondary, custom_id="quant:micro:progress", row=1)
+    async def progress_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.send_message(
+            f"Rebate Micro 거래대금 진행률: `{self.controller.rebate_turnover_progress_text()}`",
+            ephemeral=True,
+        )
+
     @discord.ui.button(label="Refresh Panel", style=discord.ButtonStyle.secondary, custom_id="quant:refresh", row=1)
     async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.defer(ephemeral=True)
@@ -670,7 +781,10 @@ class ControlPanelView(discord.ui.View):
             return
         self.controller.stop_micro_trader()
         await interaction.response.send_message(
-            "Rebate Micro 자동매매를 중지했습니다. 보유분은 강제청산하지 않습니다.",
+            (
+                "Rebate Micro 자동매매를 중지했습니다. 보유분은 강제청산하지 않습니다.\n"
+                f"거래대금 진행률: `{self.controller.rebate_turnover_progress_text()}`"
+            ),
             ephemeral=True,
         )
         await interaction.message.edit(
@@ -761,6 +875,148 @@ class PulseMarketModal(discord.ui.Modal, title="Set Pulse Market"):
                 f"시장 변경 실패: `{type(exc).__name__}: {exc}`",
                 ephemeral=True,
             )
+
+
+class RebateRecommendationView(discord.ui.View):
+    """Ephemeral buttons for selecting a recommended Rebate Micro market."""
+
+    def __init__(
+        self,
+        controller: QuantControlController,
+        *,
+        candidates: list[RebateMarketCandidate],
+        panel_message: discord.Message,
+    ):
+        super().__init__(timeout=300)
+        self.controller = controller
+        self.candidates = candidates[:5]
+        self.panel_message = panel_message
+        for idx, candidate in enumerate(self.candidates):
+            self.add_item(RebateCandidateButton(idx, candidate))
+
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        item,
+    ) -> None:
+        await respond_interaction_error(interaction, error, prefix="추천 종목 선택 실패")
+
+
+class RebateCandidateButton(discord.ui.Button):
+    """A single candidate selection button."""
+
+    def __init__(self, index: int, candidate: RebateMarketCandidate):
+        label = f"{index + 1}. {candidate.market.replace('KRW-', '')}"
+        style = discord.ButtonStyle.success if candidate.expected_net_pct > 0 else discord.ButtonStyle.secondary
+        super().__init__(
+            label=label,
+            style=style,
+            custom_id=f"quant:micro:candidate:{index}",
+            row=0,
+        )
+        self.candidate = candidate
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, RebateRecommendationView):
+            await interaction.response.send_message("추천 뷰 상태를 확인할 수 없습니다.", ephemeral=True)
+            return
+        if not view.controller.is_admin(interaction.user.id):
+            await interaction.response.send_message("관리자 권한이 없습니다.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            (
+                f"`{self.candidate.market}`로 Rebate Micro를 시작할까요?\n"
+                f"{format_candidate_line(self.candidate)}"
+            ),
+            view=ConfirmRebateMarketStartView(
+                view.controller,
+                candidate=self.candidate,
+                panel_message=view.panel_message,
+            ),
+            ephemeral=True,
+        )
+
+
+class ConfirmRebateMarketStartView(discord.ui.View):
+    """Confirm normal or forced Rebate Micro start for a selected market."""
+
+    def __init__(
+        self,
+        controller: QuantControlController,
+        *,
+        candidate: RebateMarketCandidate,
+        panel_message: discord.Message,
+    ):
+        super().__init__(timeout=300)
+        self.controller = controller
+        self.candidate = candidate
+        self.panel_message = panel_message
+        self.submitted = False
+
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        item,
+    ) -> None:
+        await respond_interaction_error(interaction, error, prefix="Micro 시작 처리 실패")
+
+    async def _start(self, interaction: discord.Interaction, *, force_loss_limits: bool) -> None:
+        if not self.controller.is_admin(interaction.user.id):
+            await interaction.response.send_message("관리자 권한이 없습니다.", ephemeral=True)
+            return
+        if self.submitted:
+            await interaction.response.send_message("이미 시작 요청을 처리 중입니다.", ephemeral=True)
+            return
+        self.submitted = True
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        try:
+            market = self.controller.start_micro_trader(
+                updated_by=str(interaction.user.id),
+                market=self.candidate.market,
+                force_loss_limits=force_loss_limits,
+            )
+            mode = "Force Start" if force_loss_limits else "Start"
+            detail = (
+                f"{mode}: `{market}` Rebate Micro를 시작했습니다.\n"
+                f"거래대금 진행률: `{self.controller.rebate_turnover_progress_text()}`"
+            )
+            if force_loss_limits:
+                detail += (
+                    f"\n손실 제한 우회는 {self.controller.force_start_minutes}분 동안만 활성화됩니다. "
+                    "킬스위치/스프레드/미체결/잔고/주문횟수 한도는 계속 적용됩니다."
+                )
+            await interaction.followup.send(detail, ephemeral=True)
+            await self.panel_message.edit(
+                embed=await self.controller.build_panel_embed(),
+                view=ControlPanelView(self.controller),
+            )
+        except Exception as exc:
+            self.submitted = False
+            await interaction.followup.send(
+                f"Micro 시작 실패: `{type(exc).__name__}: {exc}`",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(label="Start", style=discord.ButtonStyle.success)
+    async def start(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._start(interaction, force_loss_limits=False)
+
+    @discord.ui.button(label="Force Start", style=discord.ButtonStyle.danger)
+    async def force_start(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._start(interaction, force_loss_limits=True)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(content="Micro 시작을 취소했습니다.", view=None)
 
 
 class ConfirmManualTradeView(discord.ui.View):
@@ -958,9 +1214,9 @@ class ConfirmStartMicroView(discord.ui.View):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            self.controller.start_micro_trader(updated_by=str(interaction.user.id))
+            market = self.controller.start_micro_trader(updated_by=str(interaction.user.id))
             await interaction.followup.send(
-                "Rebate Micro 자동매매를 시작했습니다. 다음 판단 사이클부터 작동합니다.",
+                f"Rebate Micro 자동매매를 `{market}`에서 시작했습니다. 다음 판단 사이클부터 작동합니다.",
                 ephemeral=True,
             )
             await self.panel_message.edit(
@@ -1157,6 +1413,55 @@ def _risk_block_summary(report) -> str:
     return ", ".join(blocks) if blocks else "none"
 
 
+def build_rebate_recommendation_embed(
+    candidates: list[RebateMarketCandidate],
+) -> discord.Embed:
+    """Build Discord embed for Rebate Micro candidate ranking."""
+    color = COLOR_SUCCESS if any(c.expected_net_pct > 0 for c in candidates) else COLOR_WARNING
+    fields = []
+    for idx, candidate in enumerate(candidates[:5], 1):
+        fields.append(
+            DiscordField(
+                f"{idx}. {candidate.market}",
+                format_candidate_line(candidate),
+                inline=False,
+            )
+        )
+    if not fields:
+        fields.append(
+            DiscordField(
+                "No candidate",
+                "유동성/스프레드/변동성/기대값 필터를 통과한 후보가 없습니다.",
+                inline=False,
+            )
+        )
+    return to_discord_embed(
+        DiscordEmbed(
+            title="Rebate Micro market recommendations",
+            description=(
+                "유동성 -> 스프레드 -> 단기 변동성 -> 모멘텀/반전 -> 비용 이후 기대값 순으로 "
+                "실시간 점수화했습니다.\n"
+                f"```text\n{format_candidate_lines(candidates)}\n```"
+            ),
+            color=color,
+            fields=tuple(fields),
+        )
+    )
+
+
+def format_candidate_line(candidate: RebateMarketCandidate) -> str:
+    """Format one Rebate Micro candidate."""
+    return (
+        f"score {candidate.score:.2f} | "
+        f"24h {format_krw(candidate.liquidity_krw)} KRW | "
+        f"spread {candidate.spread_pct * Decimal('100'):.3f}% | "
+        f"vol {candidate.volatility_pct * Decimal('100'):.3f}% | "
+        f"mom {candidate.momentum_pct * Decimal('100'):+.3f}% | "
+        f"EV {candidate.expected_net_pct * Decimal('100'):+.3f}% | "
+        f"{candidate.reason}"
+    )
+
+
 def build_manual_order_embed(
     *,
     title: str,
@@ -1228,6 +1533,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile-mode-file", default="logs/eth_cash_live_profile.json")
     parser.add_argument("--market-mode-file", default="logs/pulse_market.json")
     parser.add_argument("--auto-trade-file", default="logs/AUTO_TRADE_ENABLED")
+    parser.add_argument("--force-start-file", default="logs/REBATE_MICRO_FORCE_START.json")
+    parser.add_argument("--force-start-minutes", type=int, default=60)
+    parser.add_argument("--turnover-file", default="logs/rebate_micro_turnover.json")
+    parser.add_argument("--turnover-target-krw", type=Decimal, default=Decimal("100000000000"))
     parser.add_argument("--service-name", default="quant-eth-cash-live")
     parser.add_argument("--panel-state-file", default="logs/discord_control_panel_state.json")
     parser.add_argument("--max-manual-order-krw", type=Decimal, default=Decimal("25000"))
@@ -1237,6 +1546,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-orders-per-day", type=int, default=12)
     parser.add_argument("--cooldown-minutes", type=int, default=60)
     parser.add_argument("--cooldown-seconds", type=int, default=None)
+    parser.add_argument("--scanner-min-liquidity-krw", type=Decimal, default=Decimal("1000000000"))
+    parser.add_argument("--scanner-max-spread-pct", type=Decimal, default=Decimal("0.0015"))
+    parser.add_argument("--scanner-min-volatility-pct", type=Decimal, default=Decimal("0.00025"))
+    parser.add_argument("--scanner-fee-round-trip-pct", type=Decimal, default=Decimal("0.0008"))
+    parser.add_argument("--scanner-rebate-round-trip-pct", type=Decimal, default=Decimal("0.0008"))
+    parser.add_argument("--scanner-slippage-buffer-pct", type=Decimal, default=Decimal("0.0002"))
+    parser.add_argument("--scanner-prefilter-limit", type=int, default=30)
     parser.add_argument(
         "--no-sticky-panel",
         action="store_true",
@@ -1268,6 +1584,8 @@ def main() -> None:
         profile_mode_path=Path(args.profile_mode_file),
         market_mode_path=Path(args.market_mode_file),
         auto_trade_path=Path(args.auto_trade_file),
+        force_start_path=Path(args.force_start_file),
+        turnover_path=Path(args.turnover_file),
         service_name=args.service_name,
         admin_user_ids=parse_admin_user_ids(cfg.discord_admin_user_ids),
         max_manual_order_krw=args.max_manual_order_krw,
@@ -1277,6 +1595,15 @@ def main() -> None:
         max_orders_per_day=args.max_orders_per_day,
         cooldown_minutes=args.cooldown_minutes,
         cooldown_seconds=args.cooldown_seconds,
+        force_start_minutes=args.force_start_minutes,
+        turnover_target_krw=args.turnover_target_krw,
+        scanner_min_liquidity_krw=args.scanner_min_liquidity_krw,
+        scanner_max_spread_pct=args.scanner_max_spread_pct,
+        scanner_min_volatility_pct=args.scanner_min_volatility_pct,
+        scanner_fee_round_trip_pct=args.scanner_fee_round_trip_pct,
+        scanner_rebate_round_trip_pct=args.scanner_rebate_round_trip_pct,
+        scanner_slippage_buffer_pct=args.scanner_slippage_buffer_pct,
+        scanner_prefilter_limit=args.scanner_prefilter_limit,
     )
     intents = discord.Intents.default()
     if not args.no_sticky_panel:
