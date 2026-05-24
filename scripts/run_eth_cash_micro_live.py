@@ -77,7 +77,16 @@ VOLUME_QUANT = Decimal("0.00000001")
 ADAPTIVE_ALPHA_PROFILES = {"stable_quality"}
 SCALP_PROFILES = {"scalp_active", "scalp_1m"}
 PULSE_PROFILES = {"pulse_10s"}
-RUNTIME_PROFILE_CHOICES = {"stable_quality", "scalp_active", "scalp_1m", "pulse_10s"}
+REBATE_MICRO_PROFILES = {"rebate_micro"}
+SELECTABLE_MARKET_PROFILES = PULSE_PROFILES | REBATE_MICRO_PROFILES
+START_STOP_PROFILES = REBATE_MICRO_PROFILES
+RUNTIME_PROFILE_CHOICES = {
+    "stable_quality",
+    "scalp_active",
+    "scalp_1m",
+    "pulse_10s",
+    "rebate_micro",
+}
 PROFILE_DEFAULT_TIMEFRAMES = {
     "daily": "1d",
     "intraday4h": "4h",
@@ -86,11 +95,13 @@ PROFILE_DEFAULT_TIMEFRAMES = {
     "scalp_active": "5m",
     "scalp_1m": "1m",
     "pulse_10s": "1m",
+    "rebate_micro": "1m",
 }
 PROFILE_DEFAULT_CANDLE_COUNTS = {
     "scalp_active": 200,
     "scalp_1m": 200,
     "pulse_10s": 10,
+    "rebate_micro": 10,
 }
 
 
@@ -281,10 +292,21 @@ def strategy_params_for_profile(profile: str) -> dict:
         }
     if profile == "pulse_10s":
         return {
+            "label": "pulse",
             "buy_interval_seconds": 600,
             "min_exit_hold_seconds": 3,
             "take_profit_pct": 0.0030,
             "stop_loss_pct": 0.0004,
+            "max_position": 1.0,
+            "required_history_days": 1,
+        }
+    if profile == "rebate_micro":
+        return {
+            "label": "rebate micro",
+            "buy_interval_seconds": 0,
+            "min_exit_hold_seconds": 0,
+            "take_profit_pct": 0.0001,
+            "stop_loss_pct": 0.0002,
             "max_position": 1.0,
             "required_history_days": 1,
         }
@@ -294,7 +316,7 @@ def strategy_params_for_profile(profile: str) -> dict:
 def build_strategy_for_profile(profile: str):
     """Build the strategy implementation mapped to a live profile."""
     params = strategy_params_for_profile(profile)
-    if profile in PULSE_PROFILES:
+    if profile in SELECTABLE_MARKET_PROFILES:
         return PulseScalperStrategy(params=params)
     if profile in SCALP_PROFILES:
         return ETHMicroScalperStrategy(params=params)
@@ -322,7 +344,7 @@ def validate_profile_timeframe(profile: str, timeframe: str) -> None:
         raise ValueError(f"{profile} profile은 --timeframe 4h와 함께 사용해야 합니다.")
     if profile in SCALP_PROFILES and timeframe != expected:
         raise ValueError(f"{profile} profile은 --timeframe {expected}와 함께 사용해야 합니다.")
-    if profile in PULSE_PROFILES and timeframe != expected:
+    if profile in SELECTABLE_MARKET_PROFILES and timeframe != expected:
         raise ValueError(f"{profile} profile은 --timeframe {expected}와 함께 사용해야 합니다.")
 
 
@@ -369,7 +391,7 @@ def normalize_krw_market(market: str) -> str:
 def validate_profile_market(profile: str, market: str) -> None:
     """Validate whether a market can run with the selected profile."""
     normalized = normalize_krw_market(market)
-    if profile not in PULSE_PROFILES and normalized != MARKET:
+    if profile not in SELECTABLE_MARKET_PROFILES and normalized != MARKET:
         raise ValueError(f"{profile} profile은 ETH 전용입니다. --market {MARKET}만 허용합니다.")
 
 
@@ -402,6 +424,31 @@ def save_runtime_market_mode(path: Path, market: str, *, updated_by: str = "loca
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def auto_trade_enabled(path: Path) -> bool:
+    """Return whether start/stop controlled auto-trading is enabled."""
+    return path.exists()
+
+
+def enable_auto_trade(path: Path, *, profile: str, updated_by: str = "local") -> None:
+    """Persist start/stop controlled auto-trading as enabled."""
+    if profile not in START_STOP_PROFILES:
+        raise ValueError(f"start/stop 자동거래 대상 profile이 아닙니다: {profile}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "enabled": True,
+        "profile": profile,
+        "updated_by": updated_by,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def disable_auto_trade(path: Path) -> None:
+    """Disable start/stop controlled auto-trading."""
+    if path.exists():
+        path.unlink()
+
+
 def resolve_runtime_profile(
     args: argparse.Namespace,
     profile_mode_path: Path,
@@ -418,7 +465,7 @@ def resolve_runtime_profile(
     validate_profile_timeframe(profile, timeframe)
     market = normalize_krw_market(args.market)
     market_source = "service args"
-    if profile in PULSE_PROFILES and market_mode_path is not None:
+    if profile in SELECTABLE_MARKET_PROFILES and market_mode_path is not None:
         runtime_market = load_runtime_market_mode(market_mode_path)
         if runtime_market:
             market = runtime_market
@@ -793,6 +840,7 @@ def parse_args() -> argparse.Namespace:
             "scalp_active",
             "scalp_1m",
             "pulse_10s",
+            "rebate_micro",
         ],
         default=DEFAULT_PROFILE,
     )
@@ -858,6 +906,11 @@ def parse_args() -> argparse.Namespace:
         default="logs/pulse_market.json",
         help="Optional runtime market file for pulse_10s. Discord can switch KRW alt markets here.",
     )
+    parser.add_argument(
+        "--auto-trade-file",
+        default="logs/AUTO_TRADE_ENABLED",
+        help="Start/stop flag for start-button controlled strategies such as rebate_micro.",
+    )
     parser.add_argument("--live", action="store_true", help="Send real orders. Requires TRADING_MODE=LIVE.")
     parser.add_argument("--yes-i-understand-risk", action="store_true")
     parser.add_argument("--notify-dry-run", action="store_true", help="Send Discord alerts for dry-run orders/errors.")
@@ -918,6 +971,7 @@ def print_banner(args: argparse.Namespace, dry_run: bool) -> None:
     print(f"risk_state={args.risk_state_file} kill_switch={args.kill_switch_file}")
     print(f"profile_mode_file={args.profile_mode_file}")
     print(f"market_mode_file={args.market_mode_file}")
+    print(f"auto_trade_file={args.auto_trade_file}")
 
 
 def notify_safely(
@@ -1258,7 +1312,23 @@ def run_cycle(
             "trade_price": float(ticker.trade_price),
         },
     )
-    decision = strategy.generate_signal(ctx)
+    start_stop_required = runtime_profile.profile in START_STOP_PROFILES
+    start_stop_enabled = (
+        not start_stop_required or
+        auto_trade_enabled(Path(args.auto_trade_file))
+    )
+    if start_stop_enabled:
+        decision = strategy.generate_signal(ctx)
+    else:
+        decision = TradeDecision(
+            signal=Signal.HOLD,
+            target_weight=0.0,
+            reason=(
+                f"{runtime_profile.profile} stopped by Discord Start/Stop control | "
+                f"create {args.auto_trade_file} to enable"
+            ),
+            confidence=0.0,
+        )
     plan = build_pilot_plan(
         decision=decision,
         balances=balances,
@@ -1287,8 +1357,10 @@ def run_cycle(
     print(f"스프레드: {orderbook.spread_pct * Decimal('100'):.4f}%")
     print(f"오늘 주문수: {state.orders_today}/{args.max_orders_per_day}")
     print(f"추매 카운트: {state.averaging_count}")
-    if runtime_profile.profile in PULSE_PROFILES:
-        print(f"마지막 pulse 매수: {state.last_pulse_buy_at or '없음'}")
+    if runtime_profile.profile in SELECTABLE_MARKET_PROFILES:
+        print(f"마지막 micro 매수: {state.last_pulse_buy_at or '없음'}")
+    if start_stop_required:
+        print(f"자동거래: {'enabled' if start_stop_enabled else 'stopped'}")
 
     print("\n[위험 게이트]")
     print(f"계좌 평가액: {quantize_krw(risk_report.equity):,} KRW")
@@ -1362,7 +1434,7 @@ def run_cycle(
                 cooldown_minutes=args.cooldown_minutes,
                 cooldown_seconds=args.cooldown_seconds,
                 action=plan.action,
-                allow_sell_during_cooldown=runtime_profile.profile in PULSE_PROFILES,
+                allow_sell_during_cooldown=runtime_profile.profile in SELECTABLE_MARKET_PROFILES,
             )
 
     order = execute_plan(client, market, plan)
@@ -1383,7 +1455,7 @@ def run_cycle(
                 ),
                 is_pulse=(
                     plan.action == "BUY" and
-                    runtime_profile.profile in PULSE_PROFILES
+                    runtime_profile.profile in SELECTABLE_MARKET_PROFILES
                 ),
             ),
         )

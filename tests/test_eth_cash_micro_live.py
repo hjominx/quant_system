@@ -29,12 +29,15 @@ from scripts.run_eth_cash_micro_live import (
     PilotState,
     assert_order_quota,
     assert_spread_ok,
+    auto_trade_enabled,
     build_strategy_for_profile,
     build_pilot_plan,
     calculate_buy_amount,
     calculate_sleep_seconds,
     calculate_sell_volume,
     clock_status_alert_due,
+    disable_auto_trade,
+    enable_auto_trade,
     format_sleep_wait,
     format_cooldown,
     load_runtime_market_mode,
@@ -302,8 +305,24 @@ def test_pulse_profile_uses_generic_scalper():
     print("  ✓ 10분 매수/3초 후 TP-SL/0.3% 익절/0.04% 손절 적용")
 
 
+def test_rebate_micro_profile_uses_generic_scalper():
+    print("\n[테스트 12] Rebate Micro 프로필")
+    print("-" * 60)
+
+    strategy = build_strategy_for_profile("rebate_micro")
+
+    assert isinstance(strategy, PulseScalperStrategy)
+    assert strategy.params["buy_interval_seconds"] == 0
+    assert strategy.params["min_exit_hold_seconds"] == 0
+    assert strategy.params["take_profit_pct"] == 0.0001
+    assert strategy.params["stop_loss_pct"] == 0.0002
+
+    print("  ✓ rebate_micro가 범용 PulseScalperStrategy로 연결됨")
+    print("  ✓ 연속 진입/+0.01% 익절/-0.02% 손절 설정 적용")
+
+
 def test_runtime_profile_mode_file_switches_stable_and_scalp():
-    print("\n[테스트 12] 런타임 프로필 파일")
+    print("\n[테스트 13] 런타임 프로필 파일")
     print("-" * 60)
 
     class Args:
@@ -340,8 +359,8 @@ def test_runtime_profile_mode_file_switches_stable_and_scalp():
     print("  ✓ Discord 모드 파일로 stable/scalp 전환 가능")
 
 
-def test_runtime_pulse_market_file_switches_alt_market():
-    print("\n[테스트 13] Pulse 런타임 시장 파일")
+def test_runtime_selectable_market_file_switches_alt_market():
+    print("\n[테스트 14] 선택형 런타임 시장 파일")
     print("-" * 60)
 
     class Args:
@@ -363,15 +382,23 @@ def test_runtime_pulse_market_file_switches_alt_market():
         assert pulse.timeframe == "1m"
         assert pulse.candle_count == 10
 
-    print("  ✓ Pulse 모드에서 Discord 파일로 KRW 알트 마켓 전환 가능")
+        save_runtime_profile_mode(profile_path, "rebate_micro", updated_by="test")
+        rebate = resolve_runtime_profile(Args, profile_path, market_path)
+        assert rebate.profile == "rebate_micro"
+        assert rebate.market == "KRW-SOL"
+        assert rebate.timeframe == "1m"
+        assert rebate.candle_count == 10
+
+    print("  ✓ Pulse/Rebate Micro 모드에서 Discord 파일로 KRW 알트 마켓 전환 가능")
 
 
 def test_profile_market_validation_keeps_non_pulse_eth_only():
-    print("\n[테스트 14] 프로필별 시장 검증")
+    print("\n[테스트 15] 프로필별 시장 검증")
     print("-" * 60)
 
     assert normalize_krw_market("krw-xrp") == "KRW-XRP"
     validate_profile_market("pulse_10s", "KRW-XRP")
+    validate_profile_market("rebate_micro", "KRW-XRP")
 
     try:
         validate_profile_market("stable_quality", "KRW-XRP")
@@ -379,11 +406,26 @@ def test_profile_market_validation_keeps_non_pulse_eth_only():
     except ValueError:
         pass
 
-    print("  ✓ Pulse만 KRW 알트 선택 가능, 안정/스캘핑 프로필은 ETH 전용 유지")
+    print("  ✓ Pulse/Rebate Micro만 KRW 알트 선택 가능, 안정/스캘핑 프로필은 ETH 전용 유지")
+
+
+def test_auto_trade_start_stop_flag():
+    print("\n[테스트 16] 자동거래 시작/중지 플래그")
+    print("-" * 60)
+
+    with TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "AUTO_TRADE_ENABLED"
+        assert auto_trade_enabled(path) is False
+        enable_auto_trade(path, profile="rebate_micro", updated_by="test")
+        assert auto_trade_enabled(path) is True
+        disable_auto_trade(path)
+        assert auto_trade_enabled(path) is False
+
+    print("  ✓ Start Micro/Stop Micro 플래그 저장과 해제 정상")
 
 
 def test_order_quota_blocks_cooldown_and_daily_limit():
-    print("\n[테스트 15] 주문 쿨다운/일일 한도")
+    print("\n[테스트 17] 주문 쿨다운/일일 한도")
     print("-" * 60)
 
     now = datetime(2026, 5, 22, 9, 0, 0)
@@ -786,9 +828,11 @@ def main():
         test_scalp_active_profile_uses_micro_scalper,
         test_scalp_1m_profile_uses_micro_scalper,
         test_pulse_profile_uses_generic_scalper,
+        test_rebate_micro_profile_uses_generic_scalper,
         test_runtime_profile_mode_file_switches_stable_and_scalp,
-        test_runtime_pulse_market_file_switches_alt_market,
+        test_runtime_selectable_market_file_switches_alt_market,
         test_profile_market_validation_keeps_non_pulse_eth_only,
+        test_auto_trade_start_stop_flag,
         test_order_quota_blocks_cooldown_and_daily_limit,
         test_order_quota_supports_second_cooldown,
         test_record_order_tracks_averaging_count,

@@ -24,6 +24,7 @@ class PulseScalperStrategy(BaseStrategy):
 
     def __init__(self, params: Dict = None):
         params = params or {}
+        params.setdefault("label", "pulse")
         params.setdefault("buy_interval_seconds", 600)
         params.setdefault("min_exit_hold_seconds", 3)
         params.setdefault("take_profit_pct", 0.0030)
@@ -33,7 +34,7 @@ class PulseScalperStrategy(BaseStrategy):
         super().__init__(name="Pulse_Scalper", params=params)
 
     def _validate_params(self) -> None:
-        assert self.params["buy_interval_seconds"] > 0
+        assert self.params["buy_interval_seconds"] >= 0
         assert self.params["min_exit_hold_seconds"] >= 0
         assert 0 < self.params["take_profit_pct"] < 1
         assert 0 < self.params["stop_loss_pct"] < 1
@@ -144,7 +145,7 @@ class PulseScalperStrategy(BaseStrategy):
         else:
             age = f"{seconds_since_buy / 60:.1f}m"
         return (
-            f"{ticker} pulse {action} | price={price:.0f}, pnl={pnl:.3%}, "
+            f"{ticker} {self.params['label']} {action} | price={price:.0f}, pnl={pnl:.3%}, "
             f"last_pulse_age={age}, interval={self.params['buy_interval_seconds']}s, "
             f"exit_after={self.params['min_exit_hold_seconds']}s, "
             f"tp={self.params['take_profit_pct']:.2%}, sl={self.params['stop_loss_pct']:.2%}"

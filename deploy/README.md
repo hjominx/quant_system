@@ -8,9 +8,10 @@ pilot server. Secrets stay in `.env` on the server and must not be committed.
 Current pilot profile:
 
 - Strategy profile: `stable_quality`
-- Runtime modes: `stable_quality` (`4h`), `scalp_active` (`5m`), `scalp_1m` (`1m`), or `pulse_10s` (`1m` ticker pulse)
+- Runtime modes: `stable_quality` (`4h`), `scalp_active` (`5m`), `scalp_1m` (`1m`), `pulse_10s` (`1m` ticker pulse), or `rebate_micro` (`1m` start/stop micro)
 - Mode file: `logs/eth_cash_live_profile.json`
 - Pulse market file: `logs/pulse_market.json`
+- Auto-trade start file: `logs/AUTO_TRADE_ENABLED`
 - Loop interval: 1 second
 - Max order: 100,000 KRW
 - Max selected-market position: 200,000 KRW
@@ -22,6 +23,10 @@ Current pilot profile:
 - Pulse mode buys up to 100,000 KRW every 10 minutes on the selected KRW
   market, starts TP/SL checks 3 seconds after each pulse buy, and uses
   +0.30% take-profit / -0.04% stop-loss.
+- Rebate Micro mode is enabled only while `logs/AUTO_TRADE_ENABLED` exists.
+  It attempts continuous selected-market micro entries with +0.01%
+  take-profit and -0.02% stop-loss, while still respecting spread, risk,
+  kill switch, open-order, position, and daily order gates.
 
 Install or refresh the service on AWS:
 
@@ -35,7 +40,7 @@ sudo systemctl daemon-reload
 sudo systemctl restart quant-eth-cash-live
 sudo systemctl restart quant-discord-control
 
-systemctl cat quant-eth-cash-live | grep -E -- '--profile|--profile-mode-file|--market-mode-file|--max-order-krw|--max-position-krw|--cooldown-seconds|--max-orders-per-day|--interval-seconds'
+systemctl cat quant-eth-cash-live | grep -E -- '--profile|--profile-mode-file|--market-mode-file|--auto-trade-file|--max-order-krw|--max-position-krw|--cooldown-seconds|--max-orders-per-day|--interval-seconds'
 journalctl -u quant-eth-cash-live -n 80 --no-pager
 ```
 
@@ -74,4 +79,16 @@ from scripts.run_eth_cash_micro_live import save_runtime_market_mode, save_runti
 save_runtime_market_mode(Path("logs/pulse_market.json"), "KRW-SOL", updated_by="ssh")
 save_runtime_profile_mode(Path("logs/eth_cash_live_profile.json"), "pulse_10s", updated_by="ssh")
 PY
+
+# Start Rebate Micro on a selected KRW alt market
+python - <<'PY'
+from pathlib import Path
+from scripts.run_eth_cash_micro_live import enable_auto_trade, save_runtime_market_mode, save_runtime_profile_mode
+save_runtime_market_mode(Path("logs/pulse_market.json"), "KRW-SOL", updated_by="ssh")
+save_runtime_profile_mode(Path("logs/eth_cash_live_profile.json"), "rebate_micro", updated_by="ssh")
+enable_auto_trade(Path("logs/AUTO_TRADE_ENABLED"), profile="rebate_micro", updated_by="ssh")
+PY
+
+# Stop Rebate Micro without forcing liquidation
+rm -f logs/AUTO_TRADE_ENABLED
 ```

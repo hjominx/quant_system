@@ -55,6 +55,9 @@ from scripts.run_eth_cash_micro_live import (
     assert_spread_ok,
     calculate_sell_volume,
     default_timeframe_for_profile,
+    disable_auto_trade,
+    enable_auto_trade,
+    auto_trade_enabled,
     load_pilot_state,
     load_runtime_market_mode,
     load_runtime_profile_mode,
@@ -142,6 +145,7 @@ class QuantControlController:
         pilot_state_path: Path,
         profile_mode_path: Path,
         market_mode_path: Path,
+        auto_trade_path: Path,
         service_name: str,
         admin_user_ids: set[str],
         max_manual_order_krw: Decimal,
@@ -160,6 +164,7 @@ class QuantControlController:
         self.pilot_state_path = pilot_state_path
         self.profile_mode_path = profile_mode_path
         self.market_mode_path = market_mode_path
+        self.auto_trade_path = auto_trade_path
         self.service_name = service_name
         self.admin_user_ids = admin_user_ids
         self.max_manual_order_krw = max_manual_order_krw
@@ -190,7 +195,7 @@ class QuantControlController:
 
     def current_market_mode(self) -> str:
         """Return the active market for the currently selected profile."""
-        if self.current_profile_mode() == "pulse_10s":
+        if self.current_profile_mode() in ("pulse_10s", "rebate_micro"):
             return load_runtime_market_mode(self.market_mode_path) or self.market
         return self.market
 
@@ -199,6 +204,27 @@ class QuantControlController:
         normalized = normalize_krw_market(market)
         save_runtime_market_mode(self.market_mode_path, normalized, updated_by=updated_by)
         return normalized
+
+    def micro_auto_state(self) -> str:
+        """Return start/stop controlled micro-trader state."""
+        return "enabled" if auto_trade_enabled(self.auto_trade_path) else "stopped"
+
+    def start_micro_trader(self, *, updated_by: str) -> None:
+        """Switch to rebate_micro and enable start/stop controlled trading."""
+        save_runtime_profile_mode(
+            self.profile_mode_path,
+            "rebate_micro",
+            updated_by=updated_by,
+        )
+        enable_auto_trade(
+            self.auto_trade_path,
+            profile="rebate_micro",
+            updated_by=updated_by,
+        )
+
+    def stop_micro_trader(self) -> None:
+        """Stop start/stop controlled micro trading without forcing liquidation."""
+        disable_auto_trade(self.auto_trade_path)
 
     async def collect_snapshot_embeds(self, report: str) -> list[discord.Embed]:
         """Collect Bithumb account state and convert it to Discord embeds."""
@@ -292,6 +318,7 @@ class QuantControlController:
                 DiscordField("Mode", f"{profile} ({timeframe})"),
                 DiscordField("Live service", service_state),
                 DiscordField("Kill switch", kill_state),
+                DiscordField("Micro auto", self.micro_auto_state()),
                 DiscordField("Manual max", f"{format_krw(self.max_manual_order_krw)} KRW/order"),
                 DiscordField("Alerts", "Hourly status + order/risk/error webhooks"),
                 DiscordField("Admin gate", admin_state),
@@ -627,6 +654,30 @@ class ControlPanelView(discord.ui.View):
             ephemeral=True,
         )
 
+    @discord.ui.button(label="Start Micro", style=discord.ButtonStyle.success, custom_id="quant:micro:start", row=3)
+    async def start_micro_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await self._require_admin(interaction):
+            return
+        await interaction.response.send_message(
+            "Rebate Micro 자동매매를 시작할까요? 선택 마켓에서 TP +0.01%, SL -0.02% 모델이 다음 사이클부터 작동합니다.",
+            view=ConfirmStartMicroView(self.controller, interaction.message),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Stop Micro", style=discord.ButtonStyle.secondary, custom_id="quant:micro:stop", row=3)
+    async def stop_micro_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not await self._require_admin(interaction):
+            return
+        self.controller.stop_micro_trader()
+        await interaction.response.send_message(
+            "Rebate Micro 자동매매를 중지했습니다. 보유분은 강제청산하지 않습니다.",
+            ephemeral=True,
+        )
+        await interaction.message.edit(
+            embed=await self.controller.build_panel_embed(),
+            view=self,
+        )
+
     @discord.ui.button(label="Stable Mode", style=discord.ButtonStyle.secondary, custom_id="quant:mode:stable", row=4)
     async def stable_mode_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self._request_profile_mode(interaction, "stable_quality")
@@ -874,6 +925,58 @@ class ConfirmServerRebootView(discord.ui.View):
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await interaction.response.edit_message(content="리부트를 취소했습니다.", view=None)
+
+
+class ConfirmStartMicroView(discord.ui.View):
+    """Two-step confirmation before enabling Rebate Micro auto-trading."""
+
+    def __init__(self, controller: QuantControlController, panel_message: discord.Message):
+        super().__init__(timeout=300)
+        self.controller = controller
+        self.panel_message = panel_message
+        self.submitted = False
+
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        item,
+    ) -> None:
+        await respond_interaction_error(interaction, error, prefix="Micro 시작 처리 실패")
+
+    @discord.ui.button(label="Confirm Start Micro", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not self.controller.is_admin(interaction.user.id):
+            await interaction.response.send_message("관리자 권한이 없습니다.", ephemeral=True)
+            return
+        if self.submitted:
+            await interaction.response.send_message("이미 Micro 시작 요청을 처리 중입니다.", ephemeral=True)
+            return
+        self.submitted = True
+        for item in self.children:
+            item.disabled = True
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            self.controller.start_micro_trader(updated_by=str(interaction.user.id))
+            await interaction.followup.send(
+                "Rebate Micro 자동매매를 시작했습니다. 다음 판단 사이클부터 작동합니다.",
+                ephemeral=True,
+            )
+            await self.panel_message.edit(
+                embed=await self.controller.build_panel_embed(),
+                view=ControlPanelView(self.controller),
+            )
+        except Exception as exc:
+            self.submitted = False
+            await interaction.followup.send(
+                f"Micro 시작 실패: `{type(exc).__name__}: {exc}`",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(content="Micro 시작을 취소했습니다.", view=None)
 
 
 class ConfirmProfileModeView(discord.ui.View):
@@ -1124,6 +1227,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pilot-state-file", default="logs/eth_cash_micro_live_state.json")
     parser.add_argument("--profile-mode-file", default="logs/eth_cash_live_profile.json")
     parser.add_argument("--market-mode-file", default="logs/pulse_market.json")
+    parser.add_argument("--auto-trade-file", default="logs/AUTO_TRADE_ENABLED")
     parser.add_argument("--service-name", default="quant-eth-cash-live")
     parser.add_argument("--panel-state-file", default="logs/discord_control_panel_state.json")
     parser.add_argument("--max-manual-order-krw", type=Decimal, default=Decimal("25000"))
@@ -1163,6 +1267,7 @@ def main() -> None:
         pilot_state_path=Path(args.pilot_state_file),
         profile_mode_path=Path(args.profile_mode_file),
         market_mode_path=Path(args.market_mode_file),
+        auto_trade_path=Path(args.auto_trade_file),
         service_name=args.service_name,
         admin_user_ids=parse_admin_user_ids(cfg.discord_admin_user_ids),
         max_manual_order_krw=args.max_manual_order_krw,
