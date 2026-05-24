@@ -334,6 +334,14 @@ def strategy_params_for_profile(profile: str) -> dict:
             "reversal_min_rebound": 0.0008,
             "breakout_tolerance": 0.0015,
             "min_reentry_seconds": 3,
+            "positive_ev_required": True,
+            "max_entry_spread_pct": 0.00015,
+            "fee_round_trip_pct": 0.0008,
+            "rebate_round_trip_pct": 0.0008,
+            "slippage_buffer_pct": 0.0002,
+            "min_expected_net_pct": 0.00010,
+            "min_take_profit_after_cost_pct": 0.00020,
+            "min_reward_to_risk": 1.20,
         }
     raise ValueError(f"지원하지 않는 profile: {profile}")
 
@@ -1510,6 +1518,7 @@ def run_cycle(
             "last_action": state.last_action,
             "now": now.isoformat(timespec="seconds"),
             "trade_price": float(ticker.trade_price),
+            "spread_pct": float(orderbook.spread_pct),
         },
     )
     start_stop_required = runtime_profile.profile in START_STOP_PROFILES

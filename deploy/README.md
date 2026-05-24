@@ -31,6 +31,10 @@ Current pilot profile:
   signal filter is active, uses dynamic +0.10% to +2.00% take-profit and
   -0.02% hard stop-loss, and still respects spread, kill switch,
   open-order, position, and daily order gates.
+- Before each Rebate Micro BUY, the strategy estimates post-rebate expected
+  edge from spread, round-trip fee, rebate, slippage buffer, micro momentum,
+  micro volatility, and reward/risk. It holds if the estimate is not positive
+  enough.
 - In Rebate Micro, daily/weekly/MDD loss-rate gates do not block automated
   orders. Kill switch, spread, open-order, balance, position, and daily
   order-count gates still block orders.

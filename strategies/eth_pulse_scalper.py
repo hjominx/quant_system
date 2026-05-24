@@ -46,6 +46,14 @@ class PulseScalperStrategy(BaseStrategy):
         params.setdefault("take_profit_min_pct", params["take_profit_pct"])
         params.setdefault("take_profit_max_pct", params["take_profit_pct"])
         params.setdefault("take_profit_vol_multiplier", 1.0)
+        params.setdefault("positive_ev_required", False)
+        params.setdefault("max_entry_spread_pct", 1.0)
+        params.setdefault("fee_round_trip_pct", 0.0)
+        params.setdefault("rebate_round_trip_pct", 0.0)
+        params.setdefault("slippage_buffer_pct", 0.0)
+        params.setdefault("min_expected_net_pct", 0.0)
+        params.setdefault("min_take_profit_after_cost_pct", 0.0)
+        params.setdefault("min_reward_to_risk", 0.0)
         super().__init__(name="Pulse_Scalper", params=params)
 
     def _validate_params(self) -> None:
@@ -56,6 +64,13 @@ class PulseScalperStrategy(BaseStrategy):
         assert 0 < self.params["stop_loss_pct"] < 1
         assert 0 < self.params["max_position"] <= 1
         assert self.params["min_reentry_seconds"] >= 0
+        assert self.params["max_entry_spread_pct"] >= 0
+        assert self.params["fee_round_trip_pct"] >= 0
+        assert self.params["rebate_round_trip_pct"] >= 0
+        assert self.params["slippage_buffer_pct"] >= 0
+        assert self.params["min_expected_net_pct"] >= 0
+        assert self.params["min_take_profit_after_cost_pct"] >= 0
+        assert self.params["min_reward_to_risk"] >= 0
 
     def generate_signal(self, ctx: StrategyContext) -> TradeDecision:
         price = self._current_price(ctx)
@@ -99,7 +114,14 @@ class PulseScalperStrategy(BaseStrategy):
                 return TradeDecision(
                     signal=Signal.BUY,
                     target_weight=self.params["max_position"],
-                    reason=self._reason(ctx.ticker, "pulse add", price, pnl, seconds_since_buy, take_profit_pct),
+                    reason=self._reason(
+                        ctx.ticker,
+                        f"pulse add | {entry_reason}",
+                        price,
+                        pnl,
+                        seconds_since_buy,
+                        take_profit_pct,
+                    ),
                     confidence=1.0,
                     take_profit_pct=take_profit_pct,
                     stop_loss_pct=-self.params["stop_loss_pct"],
@@ -123,7 +145,14 @@ class PulseScalperStrategy(BaseStrategy):
             return TradeDecision(
                 signal=Signal.BUY,
                 target_weight=self.params["max_position"],
-                reason=self._reason(ctx.ticker, "pulse entry", price, 0.0, seconds_since_buy, take_profit_pct),
+                reason=self._reason(
+                    ctx.ticker,
+                    f"pulse entry | {entry_reason}",
+                    price,
+                    0.0,
+                    seconds_since_buy,
+                    take_profit_pct,
+                ),
                 confidence=1.0,
                 take_profit_pct=take_profit_pct,
                 stop_loss_pct=-self.params["stop_loss_pct"],
@@ -208,20 +237,85 @@ class PulseScalperStrategy(BaseStrategy):
             breakout
         )
 
+        reversal = 0.0
         reversal_ok = False
         if self.params["reversal_entry_enabled"]:
             reversal_window = int(self.params["reversal_lookback"])
             recent_low = min(closes[-reversal_window:])
-            rebound = closes[-1] / recent_low - 1
+            reversal = closes[-1] / recent_low - 1
             reversal_ok = (
-                rebound >= self.params["reversal_min_rebound"] and
+                reversal >= self.params["reversal_min_rebound"] and
                 recent_return > 0
             )
 
         if momentum_ok or reversal_ok:
             setup = "momentum" if momentum_ok else "reversal"
+            if self.params["positive_ev_required"]:
+                ev_allowed, ev_reason = self._positive_ev_allowed(
+                    ctx,
+                    momentum=momentum,
+                    reversal=reversal,
+                    volatility=volatility,
+                    take_profit_pct=self._take_profit_pct(ctx),
+                )
+                if not ev_allowed:
+                    return False, ev_reason
+                return True, f"{setup} mom={momentum:.3%} vol={volatility:.3%} | {ev_reason}"
             return True, f"{setup} mom={momentum:.3%} vol={volatility:.3%}"
         return False, f"no micro edge mom={momentum:.3%} vol={volatility:.3%}"
+
+    def _positive_ev_allowed(
+        self,
+        ctx: StrategyContext,
+        *,
+        momentum: float,
+        reversal: float,
+        volatility: float,
+        take_profit_pct: float,
+    ) -> tuple[bool, str]:
+        """Require a positive post-cost edge before opening a Rebate Micro trade."""
+        spread_pct = float(ctx.metadata.get("spread_pct") or 0.0)
+        max_spread_pct = float(self.params["max_entry_spread_pct"])
+        if spread_pct > max_spread_pct:
+            return False, f"spread too wide {spread_pct:.3%}>{max_spread_pct:.3%}"
+
+        fee = float(self.params["fee_round_trip_pct"])
+        rebate = float(self.params["rebate_round_trip_pct"])
+        slippage = float(self.params["slippage_buffer_pct"])
+        round_trip_cost = spread_pct + fee + slippage
+        expected_alpha = (
+            max(momentum, 0.0) * 0.35 +
+            max(reversal, 0.0) * 0.10 +
+            max(volatility, 0.0) * 0.45
+        )
+        expected_net = expected_alpha + rebate - round_trip_cost
+        min_expected_net = float(self.params["min_expected_net_pct"])
+        if expected_net < min_expected_net:
+            return (
+                False,
+                f"expected EV too low {expected_net:.3%}<{min_expected_net:.3%} "
+                f"(spread={spread_pct:.3%}, rebate={rebate:.3%})",
+            )
+
+        take_profit_after_cost = take_profit_pct + rebate - round_trip_cost
+        min_take_profit_after_cost = float(self.params["min_take_profit_after_cost_pct"])
+        if take_profit_after_cost < min_take_profit_after_cost:
+            return (
+                False,
+                f"TP after cost too thin {take_profit_after_cost:.3%}<{min_take_profit_after_cost:.3%}",
+            )
+
+        effective_loss = float(self.params["stop_loss_pct"]) + max(round_trip_cost - rebate, 0.0)
+        reward_to_risk = take_profit_after_cost / effective_loss if effective_loss > 0 else float("inf")
+        min_reward_to_risk = float(self.params["min_reward_to_risk"])
+        if reward_to_risk < min_reward_to_risk:
+            return False, f"reward/risk too low {reward_to_risk:.2f}<{min_reward_to_risk:.2f}"
+
+        return (
+            True,
+            f"EV={expected_net:.3%}, TPnet={take_profit_after_cost:.3%}, "
+            f"RR={reward_to_risk:.2f}, spread={spread_pct:.3%}",
+        )
 
     def _take_profit_pct(self, ctx: StrategyContext) -> float:
         closes = [float(value) for value in ctx.ohlcv["close"].tolist()]

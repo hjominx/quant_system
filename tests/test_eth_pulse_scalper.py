@@ -21,6 +21,7 @@ def make_context(
     last_order_at: datetime | None = None,
     last_action: str | None = None,
     closes: list[float] | None = None,
+    spread_pct: float = 0.00005,
 ) -> StrategyContext:
     """Create a tiny live-like context using ticker price metadata."""
     values = closes or [trade_price]
@@ -57,6 +58,7 @@ def make_context(
                 else None
             ),
             "last_action": last_action,
+            "spread_pct": spread_pct,
         },
     )
 
@@ -84,6 +86,14 @@ def rebate_strategy() -> PulseScalperStrategy:
             "reversal_min_rebound": 0.0008,
             "breakout_tolerance": 0.0015,
             "min_reentry_seconds": 3,
+            "positive_ev_required": True,
+            "max_entry_spread_pct": 0.00015,
+            "fee_round_trip_pct": 0.0008,
+            "rebate_round_trip_pct": 0.0008,
+            "slippage_buffer_pct": 0.0002,
+            "min_expected_net_pct": 0.00010,
+            "min_take_profit_after_cost_pct": 0.00020,
+            "min_reward_to_risk": 1.20,
         }
     )
 
@@ -227,11 +237,56 @@ def test_rebate_micro_requires_micro_edge_before_entry():
 
     assert decision.signal == Signal.BUY
     assert "pulse entry" in decision.reason
+    assert "EV=" in decision.reason
     print("  ✓ 무조건 진입이 아니라 1분봉 변동성/모멘텀 조건 통과 시에만 진입")
 
 
+def test_rebate_micro_blocks_wide_spread_entry():
+    print("\n[테스트 8] Rebate Micro 스프레드 차단")
+    print("-" * 60)
+
+    strategy = rebate_strategy()
+    now = datetime(2026, 5, 23, 9, 0, 0)
+    trending = [
+        100.00, 100.03, 100.01, 100.05, 100.09,
+        100.07, 100.12, 100.18, 100.23, 100.30,
+    ]
+    decision = strategy.generate_signal(
+        make_context(
+            now=now,
+            trade_price=100.30,
+            closes=trending,
+            spread_pct=0.00030,
+        )
+    )
+
+    assert decision.signal == Signal.HOLD
+    assert "spread too wide" in decision.reason
+    print("  ✓ 신호가 있어도 스프레드가 넓으면 진입하지 않음")
+
+
+def test_rebate_micro_requires_positive_post_rebate_ev():
+    print("\n[테스트 9] Rebate Micro 페이백 감안 기대값")
+    print("-" * 60)
+
+    strategy = rebate_strategy()
+    strategy.params["min_expected_net_pct"] = 0.0020
+    now = datetime(2026, 5, 23, 9, 0, 0)
+    trending = [
+        100.00, 100.03, 100.01, 100.05, 100.09,
+        100.07, 100.12, 100.18, 100.23, 100.30,
+    ]
+    decision = strategy.generate_signal(
+        make_context(now=now, trade_price=100.30, closes=trending)
+    )
+
+    assert decision.signal == Signal.HOLD
+    assert "expected EV too low" in decision.reason
+    print("  ✓ 페이백을 감안해도 기대값 버퍼가 부족하면 진입하지 않음")
+
+
 def test_rebate_micro_dynamic_take_profit_and_stop():
-    print("\n[테스트 8] Rebate Micro 동적 익절/하드 손절")
+    print("\n[테스트 10] Rebate Micro 동적 익절/하드 손절")
     print("-" * 60)
 
     strategy = rebate_strategy()
@@ -272,7 +327,7 @@ def test_rebate_micro_dynamic_take_profit_and_stop():
 
 
 def test_rebate_micro_reentry_guard_after_sell():
-    print("\n[테스트 9] Rebate Micro 재진입 가드")
+    print("\n[테스트 11] Rebate Micro 재진입 가드")
     print("-" * 60)
 
     strategy = rebate_strategy()
@@ -309,6 +364,8 @@ def main():
         test_pulse_stops_loss_from_live_ticker,
         test_pulse_does_not_exit_before_three_seconds,
         test_rebate_micro_requires_micro_edge_before_entry,
+        test_rebate_micro_blocks_wide_spread_entry,
+        test_rebate_micro_requires_positive_post_rebate_ev,
         test_rebate_micro_dynamic_take_profit_and_stop,
         test_rebate_micro_reentry_guard_after_sell,
     ]
