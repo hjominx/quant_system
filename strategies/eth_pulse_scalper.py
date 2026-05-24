@@ -20,6 +20,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from strategies.base import BaseStrategy, Signal, StrategyContext, TradeDecision
 
 
+EPSILON = 1e-12
+
+
 class PulseScalperStrategy(BaseStrategy):
     """Time-pulsed KRW-market scalper using live ticker price for exits."""
 
@@ -91,7 +94,7 @@ class PulseScalperStrategy(BaseStrategy):
 
         if ctx.current_position > 0 and ctx.avg_buy_price > 0:
             pnl = price / ctx.avg_buy_price - 1
-            if exit_armed and pnl >= take_profit_pct:
+            if exit_armed and pnl + EPSILON >= take_profit_pct:
                 return TradeDecision(
                     signal=Signal.SELL,
                     target_weight=0.0,
