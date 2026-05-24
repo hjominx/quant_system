@@ -67,11 +67,11 @@ def rebate_strategy() -> PulseScalperStrategy:
             "label": "rebate micro",
             "buy_interval_seconds": 0,
             "min_exit_hold_seconds": 0,
-            "take_profit_pct": 0.0003,
-            "take_profit_min_pct": 0.0003,
-            "take_profit_max_pct": 0.0100,
+            "take_profit_pct": 0.0010,
+            "take_profit_min_pct": 0.0010,
+            "take_profit_max_pct": 0.0200,
             "take_profit_vol_multiplier": 1.20,
-            "stop_loss_pct": 0.0004,
+            "stop_loss_pct": 0.0002,
             "max_position": 1.0,
             "add_while_holding": False,
             "entry_signal_required": True,
@@ -243,7 +243,7 @@ def test_rebate_micro_dynamic_take_profit_and_stop():
     decision = strategy.generate_signal(
         make_context(
             now=now,
-            trade_price=100.08,
+            trade_price=100.12,
             current_position=10.0,
             avg_buy_price=100.0,
             last_pulse_buy_at=now - timedelta(seconds=1),
@@ -253,7 +253,7 @@ def test_rebate_micro_dynamic_take_profit_and_stop():
 
     assert decision.signal == Signal.SELL
     assert "take-profit" in decision.reason
-    assert 0.0003 <= decision.take_profit_pct <= 0.0100
+    assert 0.0010 <= decision.take_profit_pct <= 0.0200
 
     decision = strategy.generate_signal(
         make_context(
@@ -268,7 +268,7 @@ def test_rebate_micro_dynamic_take_profit_and_stop():
 
     assert decision.signal == Signal.SELL
     assert "stop-loss" in decision.reason
-    print("  ✓ 익절은 0.03~1.00% 범위, 손절은 -0.04% 기준으로 작동")
+    print("  ✓ 익절은 0.10~2.00% 범위, 손절은 -0.02% 기준으로 작동")
 
 
 def test_rebate_micro_reentry_guard_after_sell():

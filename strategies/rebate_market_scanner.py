@@ -45,6 +45,7 @@ def scan_rebate_micro_candidates(
     prefilter_limit: int = 30,
     result_limit: int = 5,
     candle_count: int = 30,
+    sort_by: str = "score",
 ) -> list[RebateMarketCandidate]:
     """Return ranked live candidates for Rebate Micro trading.
 
@@ -93,15 +94,28 @@ def scan_rebate_micro_candidates(
         if candidate.volatility_pct >= min_volatility_pct:
             candidates.append(candidate)
 
-    candidates.sort(
-        key=lambda candidate: (
-            candidate.expected_net_pct > 0,
-            candidate.score,
-            candidate.expected_net_pct,
-            candidate.liquidity_krw,
-        ),
-        reverse=True,
-    )
+    if sort_by == "volatility":
+        candidates.sort(
+            key=lambda candidate: (
+                candidate.volatility_pct,
+                candidate.liquidity_krw,
+                -candidate.spread_pct,
+                candidate.score,
+            ),
+            reverse=True,
+        )
+    elif sort_by == "score":
+        candidates.sort(
+            key=lambda candidate: (
+                candidate.expected_net_pct > 0,
+                candidate.score,
+                candidate.expected_net_pct,
+                candidate.liquidity_krw,
+            ),
+            reverse=True,
+        )
+    else:
+        raise ValueError(f"unsupported candidate sort: {sort_by}")
     return candidates[:result_limit]
 
 
@@ -130,7 +144,8 @@ def score_rebate_market_candidate(
         (log10(float(liquidity_krw)) - log10(float(min_liquidity_krw))) / 2.0
     )
     spread_score = _clamp(1.0 - float(spread_pct / max_spread_pct))
-    volatility_score = _clamp(float(vol / (min_volatility_pct * Decimal("4"))))
+    volatility_denominator = max(min_volatility_pct * Decimal("4"), Decimal("0.000001"))
+    volatility_score = _clamp(float(vol / volatility_denominator))
 
     momentum_score = _clamp(float((mom_3 * Decimal("0.70") + mom_10 * Decimal("0.30")) / Decimal("0.003")))
     reversal_score = _clamp(float(reversal / Decimal("0.004")))

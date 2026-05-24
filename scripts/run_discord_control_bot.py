@@ -304,6 +304,23 @@ class QuantControlController:
                 prefilter_limit=self.scanner_prefilter_limit,
             )
 
+    async def volatile_market_choices(self) -> list[RebateMarketCandidate]:
+        """Return selectable KRW markets sorted by short-term volatility."""
+        async with self.lock:
+            return await asyncio.to_thread(
+                scan_rebate_micro_candidates,
+                self.client,
+                min_liquidity_krw=self.scanner_min_liquidity_krw,
+                max_spread_pct=self.scanner_max_spread_pct,
+                min_volatility_pct=self.scanner_min_volatility_pct,
+                fee_round_trip_pct=self.scanner_fee_round_trip_pct,
+                rebate_round_trip_pct=self.scanner_rebate_round_trip_pct,
+                slippage_buffer_pct=self.scanner_slippage_buffer_pct,
+                prefilter_limit=self.scanner_prefilter_limit,
+                result_limit=15,
+                sort_by="volatility",
+            )
+
     async def collect_snapshot_embeds(self, report: str) -> list[discord.Embed]:
         """Collect Bithumb account state and convert it to Discord embeds."""
         market = self.current_market_mode()
@@ -778,7 +795,7 @@ class ControlPanelView(discord.ui.View):
         await interaction.response.send_message(
             (
                 "Rebate Micro 자동매매를 시작할까요? 선택 마켓에서 1분봉 마이크로 신호가 있을 때만 "
-                "진입하고, +0.03~1.00% 동적 익절 / -0.04% 손절 모델이 다음 사이클부터 작동합니다."
+                "진입하고, +0.10~2.00% 동적 익절 / -0.02% 손절 모델이 다음 사이클부터 작동합니다."
             ),
             view=ConfirmStartMicroView(self.controller, interaction.message),
             ephemeral=True,
@@ -821,9 +838,23 @@ class ControlPanelView(discord.ui.View):
     async def set_market_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not await self._require_admin(interaction):
             return
-        await interaction.response.send_modal(
-            PulseMarketModal(self.controller, panel_message=interaction.message)
-        )
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            candidates = await self.controller.volatile_market_choices()
+            await interaction.followup.send(
+                embed=build_volatile_market_embed(candidates),
+                view=MarketChoiceView(
+                    self.controller,
+                    candidates=candidates,
+                    panel_message=interaction.message,
+                ) if candidates else None,
+                ephemeral=True,
+            )
+        except Exception as exc:
+            await interaction.followup.send(
+                f"시장 목록 조회 실패: `{type(exc).__name__}: {exc}`",
+                ephemeral=True,
+            )
 
     async def _request_profile_mode(self, interaction: discord.Interaction, profile: str) -> None:
         if not await self._require_admin(interaction):
@@ -840,44 +871,77 @@ class ControlPanelView(discord.ui.View):
         )
 
 
-class PulseMarketModal(discord.ui.Modal, title="Set Pulse Market"):
-    """Admin modal for changing the selected Pulse KRW market."""
-
-    market = discord.ui.TextInput(
-        label="KRW market",
-        placeholder="KRW-SOL",
-        max_length=20,
-    )
+class MarketChoiceView(discord.ui.View):
+    """Ephemeral dropdown for selecting a high-volatility KRW market."""
 
     def __init__(
         self,
         controller: QuantControlController,
         *,
+        candidates: list[RebateMarketCandidate],
         panel_message: discord.Message,
     ):
-        super().__init__()
+        super().__init__(timeout=300)
         self.controller = controller
+        self.candidates = candidates[:15]
         self.panel_message = panel_message
+        self.add_item(MarketChoiceSelect(self.candidates))
 
-    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        item,
+    ) -> None:
         await respond_interaction_error(interaction, error, prefix="시장 변경 처리 실패")
 
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        if not self.controller.is_admin(interaction.user.id):
+
+class MarketChoiceSelect(discord.ui.Select):
+    """Volatility-ranked market dropdown."""
+
+    def __init__(self, candidates: list[RebateMarketCandidate]):
+        options = [
+            discord.SelectOption(
+                label=f"{idx + 1}. {candidate.market}",
+                value=candidate.market,
+                description=(
+                    f"vol {candidate.volatility_pct * Decimal('100'):.3f}% | "
+                    f"spread {candidate.spread_pct * Decimal('100'):.3f}% | "
+                    f"EV {candidate.expected_net_pct * Decimal('100'):+.3f}%"
+                )[:100],
+            )
+            for idx, candidate in enumerate(candidates[:15])
+        ]
+        super().__init__(
+            placeholder="변동성 상위 KRW 마켓 선택",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="quant:market:select",
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, MarketChoiceView):
+            await interaction.response.send_message("시장 선택 뷰 상태를 확인할 수 없습니다.", ephemeral=True)
+            return
+        if not view.controller.is_admin(interaction.user.id):
             await interaction.response.send_message("관리자 권한이 없습니다.", ephemeral=True)
             return
         try:
-            market = self.controller.set_pulse_market(
-                str(self.market.value),
+            market = view.controller.set_pulse_market(
+                self.values[0],
                 updated_by=str(interaction.user.id),
             )
-            await interaction.response.send_message(
-                f"Pulse 시장을 `{market}`로 저장했습니다. Pulse 모드의 다음 판단부터 적용됩니다.",
-                ephemeral=True,
+            for item in view.children:
+                item.disabled = True
+            await interaction.response.edit_message(
+                content=f"선택 시장을 `{market}`로 저장했습니다. Pulse/Rebate Micro 다음 판단부터 적용됩니다.",
+                view=view,
             )
-            await self.panel_message.edit(
-                embed=await self.controller.build_panel_embed(),
-                view=ControlPanelView(self.controller),
+            await view.panel_message.edit(
+                embed=await view.controller.build_panel_embed(),
+                view=ControlPanelView(view.controller),
             )
         except Exception as exc:
             await interaction.response.send_message(
@@ -1453,6 +1517,40 @@ def build_rebate_recommendation_embed(
                 f"```text\n{format_candidate_lines(candidates)}\n```"
             ),
             color=color,
+            fields=tuple(fields),
+        )
+    )
+
+
+def build_volatile_market_embed(
+    candidates: list[RebateMarketCandidate],
+) -> discord.Embed:
+    """Build Discord embed for volatility-ranked market selection."""
+    fields = []
+    for idx, candidate in enumerate(candidates[:10], 1):
+        fields.append(
+            DiscordField(
+                f"{idx}. {candidate.market}",
+                format_candidate_line(candidate),
+                inline=False,
+            )
+        )
+    if not fields:
+        fields.append(
+            DiscordField(
+                "No market",
+                "유동성/스프레드/변동성 필터를 통과한 선택 후보가 없습니다.",
+                inline=False,
+            )
+        )
+    return to_discord_embed(
+        DiscordEmbed(
+            title="Set Market by live volatility",
+            description=(
+                "현재 KRW 마켓을 1분봉 단기 변동성 높은 순서로 정렬했습니다. "
+                "드롭다운에서 선택하면 Pulse/Rebate Micro 선택 마켓으로 저장됩니다."
+            ),
+            color=COLOR_INFO,
             fields=tuple(fields),
         )
     )
