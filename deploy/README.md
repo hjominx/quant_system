@@ -29,15 +29,17 @@ Current pilot profile:
 - Rebate Micro mode is enabled only while `logs/AUTO_TRADE_ENABLED` exists.
   It attempts fast selected-market micro entries only when the 1m micro
   signal filter is active, uses dynamic +0.03% to +1.00% take-profit and
-  -0.04% hard stop-loss, and still respects spread, risk, kill switch,
+  -0.04% hard stop-loss, and still respects spread, kill switch,
   open-order, position, and daily order gates.
+- In Rebate Micro, daily/weekly/MDD loss-rate gates do not block automated
+  orders. Kill switch, spread, open-order, balance, position, and daily
+  order-count gates still block orders.
 - Rebate Micro avoids pure churn by disabling add-while-holding and adding
   a short post-sell reentry guard before opening a new position.
 - The Discord `Recommend` button scans KRW markets by liquidity, spread, 1m
   short volatility, momentum/reversal signal, and estimated post-cost edge.
-  Candidate buttons can start the selected market normally or with a
-  time-limited loss-limit override. The override never bypasses the kill
-  switch, spread, open-order, balance, position, or daily order-count gates.
+  Candidate buttons start the selected market. Rebate Micro does not use
+  daily/weekly/MDD loss-rate gates as automated-order blockers.
 
 Install or refresh the service on AWS:
 

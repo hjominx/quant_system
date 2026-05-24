@@ -535,6 +535,13 @@ def risk_override_allows(report) -> bool:
     return bool(report.daily_breached or report.weekly_breached or report.drawdown_breached)
 
 
+def loss_limit_bypass_enabled(path: Path, *, profile: str, market: str, now: datetime) -> bool:
+    """Return whether daily/weekly/MDD loss gates should be bypassed."""
+    if profile == "rebate_micro":
+        return True
+    return risk_override_enabled(path, profile=profile, market=market, now=now)
+
+
 def load_rebate_turnover_progress(
     path: Path,
     *,
@@ -1483,7 +1490,7 @@ def run_cycle(
         limits=risk_limits,
         kill_switch_file_active=kill_switch_path.exists(),
     )
-    loss_limit_override = risk_override_enabled(
+    loss_limit_bypass = loss_limit_bypass_enabled(
         Path(args.force_start_file),
         profile=runtime_profile.profile,
         market=market,
@@ -1561,7 +1568,7 @@ def run_cycle(
             target_krw=args.turnover_target_krw,
         )
         print(f"거래대금 진행률: {format_rebate_turnover_progress(progress)}")
-        print(f"손실제한 강제시작: {'active' if loss_limit_override else 'inactive'}")
+        print(f"손실률 게이트: {'bypassed' if loss_limit_bypass else 'active'}")
 
     print("\n[위험 게이트]")
     print(f"계좌 평가액: {quantize_krw(risk_report.equity):,} KRW")
@@ -1617,10 +1624,10 @@ def run_cycle(
         except RiskGateError as exc:
             if (
                 runtime_profile.profile == "rebate_micro" and
-                loss_limit_override and
+                loss_limit_bypass and
                 risk_override_allows(risk_report)
             ):
-                print(f"\n[주의] Rebate Micro force start가 손실 제한 게이트를 우회합니다: {exc}")
+                print(f"\n[주의] Rebate Micro가 손실률 게이트를 우회합니다: {exc}")
             else:
                 notify_safely(
                     notifier=notifier,

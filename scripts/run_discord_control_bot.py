@@ -342,6 +342,12 @@ class QuantControlController:
             limits=limits,
             kill_switch_file_active=self.kill_switch_path.exists(),
         )
+        block_summary = _risk_block_summary(report)
+        if self.current_profile_mode() == "rebate_micro":
+            block_summary = (
+                f"{block_summary}\n"
+                "Rebate Micro: daily/weekly/MDD loss gates do not block auto orders; kill switch remains active."
+            )
         has_block = bool(
             report.kill_switch_active or
             report.daily_breached or
@@ -364,7 +370,7 @@ class QuantControlController:
                 ),
                 DiscordField(
                     "Blocks",
-                    _risk_block_summary(report),
+                    block_summary,
                     inline=False,
                 ),
             ),
@@ -378,7 +384,7 @@ class QuantControlController:
         profile = self.current_profile_mode()
         timeframe = default_timeframe_for_profile(profile)
         market = self.current_market_mode()
-        force_state = "active" if self.force_start_path.exists() else "inactive"
+        loss_gate_state = "bypassed" if profile == "rebate_micro" else "active"
         color = COLOR_DANGER if self.kill_switch_path.exists() else COLOR_INFO
         admin_state = (
             f"{len(self.admin_user_ids)} admin id(s)"
@@ -398,7 +404,7 @@ class QuantControlController:
                 DiscordField("Live service", service_state),
                 DiscordField("Kill switch", kill_state),
                 DiscordField("Micro auto", self.micro_auto_state()),
-                DiscordField("Force loss gate", force_state),
+                DiscordField("Micro loss gate", loss_gate_state),
                 DiscordField("Turnover", self.rebate_turnover_progress_text(), inline=False),
                 DiscordField("Manual max", f"{format_krw(self.max_manual_order_krw)} KRW/order"),
                 DiscordField("Alerts", "Hourly status + order/risk/error webhooks"),
@@ -994,7 +1000,7 @@ class ConfirmRebateMarketStartView(discord.ui.View):
             )
             if force_loss_limits:
                 detail += (
-                    f"\n손실 제한 우회는 {self.controller.force_start_minutes}분 동안만 활성화됩니다. "
+                    "\nRebate Micro는 기본적으로 일일/주간/MDD 손실률 게이트를 자동매매 차단에 쓰지 않습니다. "
                     "킬스위치/스프레드/미체결/잔고/주문횟수 한도는 계속 적용됩니다."
                 )
             await interaction.followup.send(detail, ephemeral=True)

@@ -46,6 +46,7 @@ from scripts.run_eth_cash_micro_live import (
     format_sleep_wait,
     format_cooldown,
     load_rebate_turnover_progress,
+    loss_limit_bypass_enabled,
     load_runtime_market_mode,
     load_runtime_profile_mode,
     normalize_krw_market,
@@ -504,8 +505,31 @@ def test_rebate_micro_risk_override_never_bypasses_kill_switch():
     print("  ✓ 강제시작은 손실 제한만 우회하고 킬스위치는 우회하지 않음")
 
 
+def test_rebate_micro_bypasses_loss_limit_gates_by_default():
+    print("\n[테스트 19] Rebate Micro 손실률 게이트 기본 우회")
+    print("-" * 60)
+
+    now = datetime(2026, 5, 22, 9, 0, 0)
+    with TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "force.json"
+        assert loss_limit_bypass_enabled(
+            path,
+            profile="rebate_micro",
+            market="KRW-SOL",
+            now=now,
+        ) is True
+        assert loss_limit_bypass_enabled(
+            path,
+            profile="stable_quality",
+            market="KRW-ETH",
+            now=now,
+        ) is False
+
+    print("  ✓ rebate_micro는 Force 파일 없이도 일/주/MDD 손실률 게이트를 자동매매 차단에 쓰지 않음")
+
+
 def test_rebate_micro_turnover_progress_records_notional():
-    print("\n[테스트 19] Rebate Micro 거래대금 진행률")
+    print("\n[테스트 20] Rebate Micro 거래대금 진행률")
     print("-" * 60)
 
     now = datetime(2026, 5, 22, 9, 0, 0)
@@ -541,7 +565,7 @@ def test_rebate_micro_turnover_progress_records_notional():
 
 
 def test_order_quota_blocks_cooldown_and_daily_limit():
-    print("\n[테스트 20] 주문 쿨다운/일일 한도")
+    print("\n[테스트 21] 주문 쿨다운/일일 한도")
     print("-" * 60)
 
     now = datetime(2026, 5, 22, 9, 0, 0)
@@ -951,6 +975,7 @@ def main():
         test_auto_trade_start_stop_flag,
         test_rebate_micro_force_start_flag_is_scoped_and_expiring,
         test_rebate_micro_risk_override_never_bypasses_kill_switch,
+        test_rebate_micro_bypasses_loss_limit_gates_by_default,
         test_rebate_micro_turnover_progress_records_notional,
         test_order_quota_blocks_cooldown_and_daily_limit,
         test_order_quota_supports_second_cooldown,
