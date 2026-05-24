@@ -5,7 +5,7 @@ This script runs guarded decision cycles for KRW-ETH:
 1. Pull recent 4h or daily candles from Bithumb.
 2. Evaluate the selected ETH/Cash strategy profile.
 3. Check balances, open orders, spread, account risk, and micro-live caps.
-4. Place at most one market order.
+4. Place at most one guarded market or short-lived limit order.
 
 Default mode is dry-run. Real orders require all three:
     - .env TRADING_MODE=LIVE
@@ -25,7 +25,7 @@ import json
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
 from pathlib import Path
 from typing import Iterable, Optional
 import time
@@ -35,7 +35,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from execution.bithumb_client import BithumbClient
-from execution.models import Balances, Candle, Order
+from execution.models import Balances, Candle, Order, Orderbook, OrderSide
 from notifications.discord import (
     COLOR_DANGER,
     COLOR_INFO,
@@ -78,14 +78,17 @@ ADAPTIVE_ALPHA_PROFILES = {"stable_quality"}
 SCALP_PROFILES = {"scalp_active", "scalp_1m"}
 PULSE_PROFILES = {"pulse_10s"}
 REBATE_MICRO_PROFILES = {"rebate_micro"}
-SELECTABLE_MARKET_PROFILES = PULSE_PROFILES | REBATE_MICRO_PROFILES
-START_STOP_PROFILES = REBATE_MICRO_PROFILES
+NIGHT_MICRO_PROFILES = {"night_micro"}
+MICRO_PROFILES = REBATE_MICRO_PROFILES | NIGHT_MICRO_PROFILES
+SELECTABLE_MARKET_PROFILES = PULSE_PROFILES | MICRO_PROFILES
+START_STOP_PROFILES = MICRO_PROFILES
 RUNTIME_PROFILE_CHOICES = {
     "stable_quality",
     "scalp_active",
     "scalp_1m",
     "pulse_10s",
     "rebate_micro",
+    "night_micro",
 }
 PROFILE_DEFAULT_TIMEFRAMES = {
     "daily": "1d",
@@ -96,12 +99,14 @@ PROFILE_DEFAULT_TIMEFRAMES = {
     "scalp_1m": "1m",
     "pulse_10s": "1m",
     "rebate_micro": "1m",
+    "night_micro": "1m",
 }
 PROFILE_DEFAULT_CANDLE_COUNTS = {
     "scalp_active": 200,
     "scalp_1m": 200,
     "pulse_10s": 10,
     "rebate_micro": 10,
+    "night_micro": 10,
 }
 
 
@@ -112,6 +117,9 @@ class PilotPlan:
     reason: str
     krw_amount: Decimal = Decimal("0")
     volume: Decimal = Decimal("0")
+    order_type: str = "market"
+    limit_price: Decimal = Decimal("0")
+    limit_wait_seconds: int = 0
     dry_run: bool = True
 
 
@@ -316,6 +324,38 @@ def strategy_params_for_profile(profile: str) -> dict:
             "label": "rebate micro",
             "buy_interval_seconds": 0,
             "min_exit_hold_seconds": 0,
+            "take_profit_pct": 0.0030,
+            "take_profit_min_pct": 0.0030,
+            "take_profit_max_pct": 0.0050,
+            "take_profit_vol_multiplier": 1.20,
+            "stop_loss_pct": 0.0035,
+            "max_position": 1.0,
+            "required_history_days": 1,
+            "add_while_holding": False,
+            "entry_signal_required": True,
+            "min_micro_momentum": 0.00002,
+            "min_micro_volatility": 0.00002,
+            "momentum_lookback": 3,
+            "volatility_window": 8,
+            "reversal_entry_enabled": True,
+            "reversal_lookback": 8,
+            "reversal_min_rebound": 0.00020,
+            "breakout_tolerance": 0.0060,
+            "min_reentry_seconds": 3,
+            "positive_ev_required": True,
+            "max_entry_spread_pct": 0.00045,
+            "fee_round_trip_pct": 0.0008,
+            "rebate_round_trip_pct": 0.0008,
+            "slippage_buffer_pct": 0.0002,
+            "min_expected_net_pct": 0.0,
+            "min_take_profit_after_cost_pct": 0.0015,
+            "min_reward_to_risk": 0.50,
+        }
+    if profile == "night_micro":
+        return {
+            "label": "night micro",
+            "buy_interval_seconds": 0,
+            "min_exit_hold_seconds": 0,
             "take_profit_pct": 0.0015,
             "take_profit_min_pct": 0.0015,
             "take_profit_max_pct": 0.0015,
@@ -495,8 +535,8 @@ def enable_risk_override(
     minutes: int = 60,
 ) -> None:
     """Enable a time-limited Rebate Micro override for loss-limit gates only."""
-    if profile != "rebate_micro":
-        raise ValueError(f"risk override는 rebate_micro 전용입니다: {profile}")
+    if profile not in MICRO_PROFILES:
+        raise ValueError(f"risk override는 micro profile 전용입니다: {profile}")
     if minutes <= 0:
         raise ValueError("risk override minutes must be positive")
     now = datetime.now()
@@ -520,8 +560,8 @@ def disable_risk_override(path: Path) -> None:
 
 
 def risk_override_enabled(path: Path, *, profile: str, market: str, now: datetime) -> bool:
-    """Return whether a Rebate Micro loss-limit override is active."""
-    if profile != "rebate_micro" or not path.exists():
+    """Return whether a micro loss-limit override is active."""
+    if profile not in MICRO_PROFILES or not path.exists():
         return False
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -549,7 +589,7 @@ def risk_override_allows(report) -> bool:
 
 def loss_limit_bypass_enabled(path: Path, *, profile: str, market: str, now: datetime) -> bool:
     """Return whether daily/weekly/MDD loss gates should be bypassed."""
-    if profile == "rebate_micro":
+    if profile in MICRO_PROFILES:
         return True
     return risk_override_enabled(path, profile=profile, market=market, now=now)
 
@@ -843,6 +883,74 @@ def quantize_volume(volume: Decimal) -> Decimal:
     return volume.quantize(VOLUME_QUANT, rounding=ROUND_DOWN)
 
 
+def krw_tick_size(price: Decimal) -> Decimal:
+    """Return the current Bithumb KRW-market tick size for a price."""
+    if price < Decimal("1"):
+        return Decimal("0.0001")
+    if price < Decimal("10"):
+        return Decimal("0.001")
+    if price < Decimal("100"):
+        return Decimal("0.01")
+    if price < Decimal("5000"):
+        return Decimal("1")
+    if price < Decimal("10000"):
+        return Decimal("5")
+    if price < Decimal("50000"):
+        return Decimal("10")
+    if price < Decimal("100000"):
+        return Decimal("50")
+    if price < Decimal("500000"):
+        return Decimal("100")
+    if price < Decimal("1000000"):
+        return Decimal("500")
+    return Decimal("1000")
+
+
+def quantize_price_to_tick(price: Decimal, *, side: str) -> Decimal:
+    """Round a KRW price to a valid tick without worsening side safety."""
+    tick = krw_tick_size(price)
+    units = price / tick
+    if side == "ask":
+        rounded_units = units.to_integral_value(rounding=ROUND_CEILING)
+    else:
+        rounded_units = units.to_integral_value(rounding=ROUND_DOWN)
+    return max(rounded_units * tick, tick)
+
+
+def rebate_limit_buy_price(
+    best_bid: Decimal,
+    *,
+    offset_ticks: int = 1,
+    max_offset_pct: Decimal = Decimal("0.0005"),
+) -> Decimal:
+    """Place buy limit slightly below best bid when one tick is still tiny."""
+    if best_bid <= 0:
+        raise ValueError("best_bid가 0보다 커야 합니다.")
+    tick = krw_tick_size(best_bid)
+    offset = tick * Decimal(offset_ticks)
+    if offset / best_bid > max_offset_pct:
+        offset = Decimal("0")
+    return quantize_price_to_tick(best_bid - offset, side="bid")
+
+
+def rebate_take_profit_limit_price(
+    *,
+    best_ask: Decimal,
+    avg_buy_price: Decimal,
+    take_profit_pct: Optional[float],
+) -> Decimal:
+    """Place take-profit sell limit at the better of target price and best ask."""
+    if best_ask <= 0:
+        raise ValueError("best_ask가 0보다 커야 합니다.")
+    target = best_ask
+    if avg_buy_price > 0 and take_profit_pct is not None:
+        target = max(
+            best_ask,
+            avg_buy_price * (Decimal("1") + Decimal(str(take_profit_pct))),
+        )
+    return quantize_price_to_tick(target, side="ask")
+
+
 def calculate_buy_amount(
     *,
     target_weight: float,
@@ -929,7 +1037,10 @@ def build_pilot_plan(
     max_order_krw: Decimal,
     max_position_krw: Decimal,
     min_order_krw: Decimal,
-    dry_run: bool,
+    orderbook: Optional[Orderbook] = None,
+    use_limit_orders: bool = False,
+    limit_wait_seconds: int = 0,
+    dry_run: bool = True,
 ) -> PilotPlan:
     """Turn a strategy decision into one guarded pilot order plan."""
     base = market_base_currency(market)
@@ -981,6 +1092,29 @@ def build_pilot_plan(
                 ),
                 dry_run=dry_run,
             )
+        if use_limit_orders and orderbook and orderbook.best_bid:
+            limit_price = rebate_limit_buy_price(orderbook.best_bid)
+            limit_volume = quantize_volume(krw_amount / limit_price)
+            limit_notional = quantize_krw(limit_volume * limit_price)
+            if limit_notional < min_order_krw:
+                return PilotPlan(
+                    action="SKIP",
+                    reason=(
+                        "지정가 매수 신호는 있지만 호가단위 반영 후 최소 주문금액 미만 | "
+                        f"{decision.reason}"
+                    ),
+                    dry_run=dry_run,
+                )
+            return PilotPlan(
+                action="BUY",
+                reason=decision.reason,
+                krw_amount=limit_notional,
+                volume=limit_volume,
+                order_type="limit",
+                limit_price=limit_price,
+                limit_wait_seconds=limit_wait_seconds,
+                dry_run=dry_run,
+            )
         return PilotPlan(
             action="BUY",
             reason=decision.reason,
@@ -998,6 +1132,28 @@ def build_pilot_plan(
             return PilotPlan(
                 action="SKIP",
                 reason=f"매도 신호는 있지만 보유 ETH 평가액이 최소 주문금액 미만 | {decision.reason}",
+                dry_run=dry_run,
+            )
+        if (
+            use_limit_orders and
+            orderbook and
+            orderbook.best_ask and
+            "take-profit" in decision.reason
+        ):
+            account = balances.get(base)
+            avg_buy_price = account.avg_buy_price if account else Decimal("0")
+            limit_price = rebate_take_profit_limit_price(
+                best_ask=orderbook.best_ask,
+                avg_buy_price=avg_buy_price,
+                take_profit_pct=decision.take_profit_pct,
+            )
+            return PilotPlan(
+                action="SELL",
+                reason=decision.reason,
+                volume=volume,
+                order_type="limit",
+                limit_price=limit_price,
+                limit_wait_seconds=limit_wait_seconds,
                 dry_run=dry_run,
             )
         return PilotPlan(
@@ -1021,8 +1177,61 @@ def assert_spread_ok(spread_pct: Optional[Decimal], max_spread_pct: Decimal) -> 
         )
 
 
+def wait_for_limit_order_fill(
+    client: BithumbClient,
+    order: Order,
+    *,
+    wait_seconds: int,
+) -> Optional[Order]:
+    """Wait briefly for a limit order, then cancel any unfilled remainder."""
+    if client.dry_run or wait_seconds <= 0:
+        return order
+
+    deadline = time.monotonic() + wait_seconds
+    latest = order
+    while time.monotonic() < deadline:
+        latest = client.get_order(order.uuid)
+        if latest.is_filled:
+            return latest
+        if not latest.is_open:
+            return latest if latest.executed_volume > 0 else None
+        time.sleep(min(0.5, max(deadline - time.monotonic(), 0.0)))
+
+    latest = client.get_order(order.uuid)
+    if latest.is_filled:
+        return latest
+    if latest.is_open:
+        print(f"지정가 미체결 잔량 취소: uuid={order.uuid}")
+        client.cancel_order(order.uuid)
+        latest = client.get_order(order.uuid)
+    if latest.executed_volume > 0:
+        return latest
+    print(f"지정가 {wait_seconds}초 미체결로 주문 취소 완료: uuid={order.uuid}")
+    return None
+
+
 def execute_plan(client: BithumbClient, market: str, plan: PilotPlan) -> Optional[Order]:
-    """Execute one market order for the already-validated pilot plan."""
+    """Execute one market or short-lived limit order for the pilot plan."""
+    if plan.order_type == "limit":
+        if plan.limit_price <= 0 or plan.volume <= 0:
+            raise ValueError("지정가 주문에는 limit_price와 volume이 필요합니다.")
+        side = OrderSide.BID if plan.action == "BUY" else OrderSide.ASK
+        print(
+            f"지정가 주문 제출: action={plan.action} price={plan.limit_price} "
+            f"volume={plan.volume} wait={plan.limit_wait_seconds}s"
+        )
+        order = client.limit_order(
+            market=market,
+            side=side,
+            price=plan.limit_price,
+            volume=plan.volume,
+        )
+        return wait_for_limit_order_fill(
+            client,
+            order,
+            wait_seconds=plan.limit_wait_seconds,
+        )
+
     if plan.action == "BUY":
         return client.market_buy(market, plan.krw_amount)
     if plan.action == "SELL":
@@ -1050,6 +1259,7 @@ def parse_args() -> argparse.Namespace:
             "scalp_1m",
             "pulse_10s",
             "rebate_micro",
+            "night_micro",
         ],
         default=DEFAULT_PROFILE,
     )
@@ -1118,7 +1328,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--auto-trade-file",
         default="logs/AUTO_TRADE_ENABLED",
-        help="Start/stop flag for start-button controlled strategies such as rebate_micro.",
+        help="Start/stop flag for start-button controlled micro strategies.",
     )
     parser.add_argument(
         "--force-start-file",
@@ -1234,10 +1444,13 @@ def build_order_alert_embed(
         DiscordField("Mode", mode),
         DiscordField("Market", market),
         DiscordField("Action", plan.action),
+        DiscordField("Order Type", plan.order_type),
         DiscordField("State", order.state.value),
         DiscordField("Equity", f"{quantize_krw(equity):,} KRW"),
         DiscordField("UUID", order.uuid, inline=False),
     ]
+    if plan.limit_price > 0:
+        fields.append(DiscordField("Limit Price", f"{plan.limit_price:,} KRW"))
     if plan.krw_amount > 0:
         fields.append(DiscordField("KRW Amount", f"{plan.krw_amount:,} KRW"))
     if plan.volume > 0:
@@ -1577,6 +1790,9 @@ def run_cycle(
         max_order_krw=args.max_order_krw,
         max_position_krw=args.max_position_krw,
         min_order_krw=args.min_order_krw,
+        orderbook=orderbook,
+        use_limit_orders=runtime_profile.profile == "night_micro",
+        limit_wait_seconds=7,
         dry_run=dry_run,
     )
 
@@ -1602,7 +1818,7 @@ def run_cycle(
         print(f"마지막 주문 방향: {state.last_action or '없음'}")
     if start_stop_required:
         print(f"자동거래: {'enabled' if start_stop_enabled else 'stopped'}")
-    if runtime_profile.profile == "rebate_micro":
+    if runtime_profile.profile in MICRO_PROFILES:
         progress = load_rebate_turnover_progress(
             Path(args.turnover_file),
             target_krw=args.turnover_target_krw,
@@ -1663,11 +1879,11 @@ def run_cycle(
             assert_risk_allows_action(plan.action, risk_report)
         except RiskGateError as exc:
             if (
-                runtime_profile.profile == "rebate_micro" and
+                runtime_profile.profile in MICRO_PROFILES and
                 loss_limit_bypass and
                 risk_override_allows(risk_report)
             ):
-                print(f"\n[주의] Rebate Micro가 손실률 게이트를 우회합니다: {exc}")
+                print(f"\n[주의] Micro mode가 손실률 게이트를 우회합니다: {exc}")
             else:
                 notify_safely(
                     notifier=notifier,
@@ -1714,7 +1930,7 @@ def run_cycle(
                 ),
             ),
         )
-        if runtime_profile.profile == "rebate_micro":
+        if runtime_profile.profile in MICRO_PROFILES:
             progress = record_rebate_turnover(
                 Path(args.turnover_file),
                 notional_krw=estimate_order_notional(plan, ticker.trade_price),

@@ -12,7 +12,7 @@ from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from execution.models import Account, Balances
+from execution.models import Account, Balances, Orderbook, OrderbookUnit
 from risk.live_guard import (
     RiskGateError,
     RiskLimits,
@@ -45,11 +45,14 @@ from scripts.run_eth_cash_micro_live import (
     format_rebate_turnover_progress,
     format_sleep_wait,
     format_cooldown,
+    krw_tick_size,
     load_rebate_turnover_progress,
     loss_limit_bypass_enabled,
     load_runtime_market_mode,
     load_runtime_profile_mode,
     normalize_krw_market,
+    rebate_limit_buy_price,
+    rebate_take_profit_limit_price,
     record_order,
     record_rebate_turnover,
     record_status_alert,
@@ -96,6 +99,24 @@ def make_balances(krw: str = "50000", eth: str = "0") -> Balances:
             unit_currency="KRW",
         ),
     ])
+
+
+def make_orderbook(*, best_bid: str, best_ask: str) -> Orderbook:
+    """Create a synthetic one-level orderbook."""
+    return Orderbook(
+        market="KRW-ETH",
+        timestamp=0,
+        total_ask_size=Decimal("1"),
+        total_bid_size=Decimal("1"),
+        units=[
+            OrderbookUnit(
+                ask_price=Decimal(best_ask),
+                bid_price=Decimal(best_bid),
+                ask_size=Decimal("1"),
+                bid_size=Decimal("1"),
+            )
+        ],
+    )
 
 
 def test_live_permission_requires_confirmation_and_live_mode():
@@ -146,6 +167,37 @@ def test_buy_amount_respects_micro_caps():
     )
     assert blocked == Decimal("0")
     print("  ✓ 주문금액/포지션/최소주문 한도 적용")
+
+
+def test_rebate_limit_price_helpers():
+    print("\n[테스트 3] Rebate Micro 지정가 가격")
+    print("-" * 60)
+
+    assert krw_tick_size(Decimal("0.5")) == Decimal("0.0001")
+    assert krw_tick_size(Decimal("50")) == Decimal("0.01")
+    assert krw_tick_size(Decimal("3000000")) == Decimal("1000")
+
+    eth_buy = rebate_limit_buy_price(Decimal("3099000"))
+    assert eth_buy == Decimal("3098000")
+
+    low_price_buy = rebate_limit_buy_price(Decimal("301"))
+    assert low_price_buy == Decimal("301")
+
+    tp_price = rebate_take_profit_limit_price(
+        best_ask=Decimal("3100000"),
+        avg_buy_price=Decimal("3090000"),
+        take_profit_pct=0.0015,
+    )
+    assert tp_price == Decimal("3100000")
+
+    target_floor = rebate_take_profit_limit_price(
+        best_ask=Decimal("3090000"),
+        avg_buy_price=Decimal("3090000"),
+        take_profit_pct=0.0015,
+    )
+    assert target_floor == Decimal("3095000")
+
+    print("  ✓ 매수는 1틱 아래, 저가 코인은 과도한 오프셋 방지, 익절가는 목표 이상")
 
 
 def test_sell_volume_requires_minimum_value():
@@ -226,6 +278,51 @@ def test_plan_builder_never_exceeds_caps():
     assert blocked_averaging_plan.action == "SELL"
     assert blocked_averaging_plan.volume == Decimal("0.02000000")
     assert "stop auto trade" in blocked_averaging_plan.reason
+
+    limit_buy_plan = build_pilot_plan(
+        decision=TradeDecision(
+            signal=Signal.BUY,
+            target_weight=1.0,
+            reason="rebate entry",
+        ),
+        balances=make_balances(krw="100000", eth="0"),
+        trade_price=Decimal("3100000"),
+        market="KRW-ETH",
+        max_order_krw=Decimal("25000"),
+        max_position_krw=Decimal("150000"),
+        min_order_krw=Decimal("5000"),
+        orderbook=make_orderbook(best_bid="3099000", best_ask="3100000"),
+        use_limit_orders=True,
+        limit_wait_seconds=7,
+        dry_run=True,
+    )
+    assert limit_buy_plan.action == "BUY"
+    assert limit_buy_plan.order_type == "limit"
+    assert limit_buy_plan.limit_price == Decimal("3098000")
+    assert limit_buy_plan.limit_wait_seconds == 7
+    assert limit_buy_plan.volume > 0
+
+    limit_sell_plan = build_pilot_plan(
+        decision=TradeDecision(
+            signal=Signal.SELL,
+            target_weight=0.0,
+            reason="take-profit",
+            take_profit_pct=0.0015,
+        ),
+        balances=make_balances(krw="0", eth="0.02"),
+        trade_price=Decimal("3100000"),
+        market="KRW-ETH",
+        max_order_krw=Decimal("25000"),
+        max_position_krw=Decimal("150000"),
+        min_order_krw=Decimal("5000"),
+        orderbook=make_orderbook(best_bid="3099000", best_ask="3100000"),
+        use_limit_orders=True,
+        limit_wait_seconds=7,
+        dry_run=True,
+    )
+    assert limit_sell_plan.action == "SELL"
+    assert limit_sell_plan.order_type == "limit"
+    assert limit_sell_plan.limit_price == Decimal("3100000")
 
     sell_plan = build_pilot_plan(
         decision=TradeDecision(
@@ -361,12 +458,9 @@ def test_rebate_micro_profile_uses_generic_scalper():
     assert isinstance(strategy, PulseScalperStrategy)
     assert strategy.params["buy_interval_seconds"] == 0
     assert strategy.params["min_exit_hold_seconds"] == 0
-    assert strategy.params["take_profit_min_pct"] == 0.0015
-    assert strategy.params["take_profit_max_pct"] == 0.0015
-    assert strategy.params["stop_loss_pct"] == 0.0070
-    assert strategy.params["averaging_enabled"] is True
-    assert strategy.params["averaging_trigger_pct"] == 0.0020
-    assert strategy.params["averaging_order_krw"] == 20000
+    assert strategy.params["take_profit_min_pct"] == 0.0030
+    assert strategy.params["take_profit_max_pct"] == 0.0050
+    assert strategy.params["stop_loss_pct"] == 0.0035
     assert strategy.params["entry_signal_required"] is True
     assert strategy.params["add_while_holding"] is False
     assert strategy.params["positive_ev_required"] is True
@@ -376,7 +470,25 @@ def test_rebate_micro_profile_uses_generic_scalper():
     assert strategy.params["min_expected_net_pct"] == 0.0
 
     print("  ✓ rebate_micro가 범용 PulseScalperStrategy로 연결됨")
-    print("  ✓ 신호 기반 진입/+0.15% 익절/-0.20% 추매/-0.70% 손절 설정 적용")
+    print("  ✓ 신호 기반 진입/+0.30~0.50% 익절/-0.35% 손절 설정 적용")
+
+
+def test_night_micro_profile_uses_limit_averaging_scalper():
+    print("\n[테스트 12b] Night Micro 프로필")
+    print("-" * 60)
+
+    strategy = build_strategy_for_profile("night_micro")
+
+    assert isinstance(strategy, PulseScalperStrategy)
+    assert strategy.params["take_profit_min_pct"] == 0.0015
+    assert strategy.params["take_profit_max_pct"] == 0.0015
+    assert strategy.params["stop_loss_pct"] == 0.0070
+    assert strategy.params["averaging_enabled"] is True
+    assert strategy.params["averaging_trigger_pct"] == 0.0020
+    assert strategy.params["averaging_order_krw"] == 20000
+    assert strategy.params["positive_ev_required"] is True
+
+    print("  ✓ night_micro가 +0.15% 익절/-0.20% 추매/-0.70% 손절 프로필로 분리됨")
 
 
 def test_runtime_profile_mode_file_switches_stable_and_scalp():
@@ -447,7 +559,14 @@ def test_runtime_selectable_market_file_switches_alt_market():
         assert rebate.timeframe == "1m"
         assert rebate.candle_count == 10
 
-    print("  ✓ Pulse/Rebate Micro 모드에서 Discord 파일로 KRW 알트 마켓 전환 가능")
+        save_runtime_profile_mode(profile_path, "night_micro", updated_by="test")
+        night = resolve_runtime_profile(Args, profile_path, market_path)
+        assert night.profile == "night_micro"
+        assert night.market == "KRW-SOL"
+        assert night.timeframe == "1m"
+        assert night.candle_count == 10
+
+    print("  ✓ Pulse/Rebate/Night Micro 모드에서 Discord 파일로 KRW 알트 마켓 전환 가능")
 
 
 def test_profile_market_validation_keeps_non_pulse_eth_only():
@@ -457,6 +576,7 @@ def test_profile_market_validation_keeps_non_pulse_eth_only():
     assert normalize_krw_market("krw-xrp") == "KRW-XRP"
     validate_profile_market("pulse_10s", "KRW-XRP")
     validate_profile_market("rebate_micro", "KRW-XRP")
+    validate_profile_market("night_micro", "KRW-XRP")
 
     try:
         validate_profile_market("stable_quality", "KRW-XRP")
@@ -464,7 +584,7 @@ def test_profile_market_validation_keeps_non_pulse_eth_only():
     except ValueError:
         pass
 
-    print("  ✓ Pulse/Rebate Micro만 KRW 알트 선택 가능, 안정/스캘핑 프로필은 ETH 전용 유지")
+    print("  ✓ Pulse/Rebate/Night Micro만 KRW 알트 선택 가능, 안정/스캘핑 프로필은 ETH 전용 유지")
 
 
 def test_auto_trade_start_stop_flag():
@@ -475,6 +595,10 @@ def test_auto_trade_start_stop_flag():
         path = Path(tmpdir) / "AUTO_TRADE_ENABLED"
         assert auto_trade_enabled(path) is False
         enable_auto_trade(path, profile="rebate_micro", updated_by="test")
+        assert auto_trade_enabled(path) is True
+        disable_auto_trade(path)
+        assert auto_trade_enabled(path) is False
+        enable_auto_trade(path, profile="night_micro", updated_by="test")
         assert auto_trade_enabled(path) is True
         disable_auto_trade(path)
         assert auto_trade_enabled(path) is False
@@ -506,10 +630,18 @@ def test_rebate_micro_force_start_flag_is_scoped_and_expiring():
             market="KRW-SOL",
             now=expires_at + timedelta(seconds=1),
         ) is False
+        enable_risk_override(
+            path,
+            profile="night_micro",
+            market="krw-sol",
+            updated_by="test",
+            minutes=30,
+        )
+        assert risk_override_enabled(path, profile="night_micro", market="KRW-SOL", now=now) is True
         disable_risk_override(path)
         assert risk_override_enabled(path, profile="rebate_micro", market="KRW-SOL", now=now) is False
 
-    print("  ✓ 강제시작은 rebate_micro/선택마켓/만료시간 범위 안에서만 활성")
+    print("  ✓ 강제시작은 micro profile/선택마켓/만료시간 범위 안에서만 활성")
 
 
 def test_rebate_micro_risk_override_never_bypasses_kill_switch():
@@ -565,12 +697,18 @@ def test_rebate_micro_bypasses_loss_limit_gates_by_default():
         ) is True
         assert loss_limit_bypass_enabled(
             path,
+            profile="night_micro",
+            market="KRW-SOL",
+            now=now,
+        ) is True
+        assert loss_limit_bypass_enabled(
+            path,
             profile="stable_quality",
             market="KRW-ETH",
             now=now,
         ) is False
 
-    print("  ✓ rebate_micro는 Force 파일 없이도 일/주/MDD 손실률 게이트를 자동매매 차단에 쓰지 않음")
+    print("  ✓ micro profile은 Force 파일 없이도 일/주/MDD 손실률 게이트를 자동매매 차단에 쓰지 않음")
 
 
 def test_rebate_micro_turnover_progress_records_notional():
@@ -1004,6 +1142,7 @@ def main():
     tests = [
         test_live_permission_requires_confirmation_and_live_mode,
         test_buy_amount_respects_micro_caps,
+        test_rebate_limit_price_helpers,
         test_sell_volume_requires_minimum_value,
         test_plan_builder_never_exceeds_caps,
         test_spread_gate_blocks_wide_spread,
@@ -1014,6 +1153,7 @@ def main():
         test_scalp_1m_profile_uses_micro_scalper,
         test_pulse_profile_uses_generic_scalper,
         test_rebate_micro_profile_uses_generic_scalper,
+        test_night_micro_profile_uses_limit_averaging_scalper,
         test_runtime_profile_mode_file_switches_stable_and_scalp,
         test_runtime_selectable_market_file_switches_alt_market,
         test_profile_market_validation_keeps_non_pulse_eth_only,

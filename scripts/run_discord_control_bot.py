@@ -226,7 +226,7 @@ class QuantControlController:
 
     def current_market_mode(self) -> str:
         """Return the active market for the currently selected profile."""
-        if self.current_profile_mode() in ("pulse_10s", "rebate_micro"):
+        if self.current_profile_mode() in ("pulse_10s", "rebate_micro", "night_micro"):
             return load_runtime_market_mode(self.market_mode_path) or self.market
         return self.market
 
@@ -245,9 +245,12 @@ class QuantControlController:
         *,
         updated_by: str,
         market: Optional[str] = None,
+        profile: str = "rebate_micro",
         force_loss_limits: bool = False,
     ) -> str:
-        """Switch to rebate_micro and enable start/stop controlled trading."""
+        """Switch to a start/stop controlled micro profile and enable trading."""
+        if profile not in ("rebate_micro", "night_micro"):
+            raise ValueError(f"지원하지 않는 micro profile: {profile}")
         selected_market = self.current_market_mode() if market is None else normalize_krw_market(market)
         save_runtime_market_mode(
             self.market_mode_path,
@@ -256,18 +259,18 @@ class QuantControlController:
         )
         save_runtime_profile_mode(
             self.profile_mode_path,
-            "rebate_micro",
+            profile,
             updated_by=updated_by,
         )
         enable_auto_trade(
             self.auto_trade_path,
-            profile="rebate_micro",
+            profile=profile,
             updated_by=updated_by,
         )
         if force_loss_limits:
             enable_risk_override(
                 self.force_start_path,
-                profile="rebate_micro",
+                profile=profile,
                 market=selected_market,
                 updated_by=updated_by,
                 minutes=self.force_start_minutes,
@@ -360,10 +363,10 @@ class QuantControlController:
             kill_switch_file_active=self.kill_switch_path.exists(),
         )
         block_summary = _risk_block_summary(report)
-        if self.current_profile_mode() == "rebate_micro":
+        if self.current_profile_mode() in ("rebate_micro", "night_micro"):
             block_summary = (
                 f"{block_summary}\n"
-                "Rebate Micro: daily/weekly/MDD loss gates do not block auto orders; kill switch remains active."
+                "Micro mode: daily/weekly/MDD loss gates do not block auto orders; kill switch remains active."
             )
         has_block = bool(
             report.kill_switch_active or
@@ -401,7 +404,7 @@ class QuantControlController:
         profile = self.current_profile_mode()
         timeframe = default_timeframe_for_profile(profile)
         market = self.current_market_mode()
-        loss_gate_state = "bypassed" if profile == "rebate_micro" else "active"
+        loss_gate_state = "bypassed" if profile in ("rebate_micro", "night_micro") else "active"
         color = COLOR_DANGER if self.kill_switch_path.exists() else COLOR_INFO
         admin_state = (
             f"{len(self.admin_user_ids)} admin id(s)"
@@ -792,12 +795,18 @@ class ControlPanelView(discord.ui.View):
     async def start_micro_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not await self._require_admin(interaction):
             return
+        active_profile = self.controller.current_profile_mode()
+        profile = active_profile if active_profile in ("rebate_micro", "night_micro") else "rebate_micro"
+        if profile == "night_micro":
+            rule_text = "+0.15% 지정가 익절 / -0.20% 추매 / -0.70% 시장가 손절 / 지정가 7초 대기"
+        else:
+            rule_text = "+0.30~0.50% 동적 익절 / -0.35% 손절"
         await interaction.response.send_message(
             (
-                "Rebate Micro 자동매매를 시작할까요? 선택 마켓에서 1분봉 마이크로 신호가 있을 때만 "
-                "진입하고, +0.15% 익절 / -0.20% 추매 / -0.70% 손절 모델이 다음 사이클부터 작동합니다."
+                f"`{profile}` 자동매매를 시작할까요? 선택 마켓에서 1분봉 마이크로 신호가 있을 때만 "
+                f"진입하고, {rule_text} 모델이 다음 사이클부터 작동합니다."
             ),
-            view=ConfirmStartMicroView(self.controller, interaction.message),
+            view=ConfirmStartMicroView(self.controller, interaction.message, profile=profile),
             ephemeral=True,
         )
 
@@ -830,9 +839,9 @@ class ControlPanelView(discord.ui.View):
     async def scalp_1m_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self._request_profile_mode(interaction, "scalp_1m")
 
-    @discord.ui.button(label="Pulse 1s", style=discord.ButtonStyle.danger, custom_id="quant:mode:pulse10s", row=4)
-    async def pulse_10s_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self._request_profile_mode(interaction, "pulse_10s")
+    @discord.ui.button(label="Night", style=discord.ButtonStyle.danger, custom_id="quant:mode:night", row=4)
+    async def night_micro_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._request_profile_mode(interaction, "night_micro")
 
     @discord.ui.button(label="Set Market", style=discord.ButtonStyle.secondary, custom_id="quant:pulse:market", row=4)
     async def set_market_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -1052,14 +1061,18 @@ class ConfirmRebateMarketStartView(discord.ui.View):
         except Exception:
             pass
         try:
+            profile = self.controller.current_profile_mode()
+            if profile not in ("rebate_micro", "night_micro"):
+                profile = "rebate_micro"
             market = self.controller.start_micro_trader(
                 updated_by=str(interaction.user.id),
                 market=self.candidate.market,
+                profile=profile,
                 force_loss_limits=force_loss_limits,
             )
             mode = "Force Start" if force_loss_limits else "Start"
             detail = (
-                f"{mode}: `{market}` Rebate Micro를 시작했습니다.\n"
+                f"{mode}: `{market}` `{profile}`를 시작했습니다.\n"
                 f"거래대금 진행률: `{self.controller.rebate_turnover_progress_text()}`"
             )
             if force_loss_limits:
@@ -1259,10 +1272,17 @@ class ConfirmServerRebootView(discord.ui.View):
 class ConfirmStartMicroView(discord.ui.View):
     """Two-step confirmation before enabling Rebate Micro auto-trading."""
 
-    def __init__(self, controller: QuantControlController, panel_message: discord.Message):
+    def __init__(
+        self,
+        controller: QuantControlController,
+        panel_message: discord.Message,
+        *,
+        profile: str = "rebate_micro",
+    ):
         super().__init__(timeout=300)
         self.controller = controller
         self.panel_message = panel_message
+        self.profile = profile
         self.submitted = False
 
     async def on_error(
@@ -1287,9 +1307,12 @@ class ConfirmStartMicroView(discord.ui.View):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            market = self.controller.start_micro_trader(updated_by=str(interaction.user.id))
+            market = self.controller.start_micro_trader(
+                updated_by=str(interaction.user.id),
+                profile=self.profile,
+            )
             await interaction.followup.send(
-                f"Rebate Micro 자동매매를 `{market}`에서 시작했습니다. 다음 판단 사이클부터 작동합니다.",
+                f"`{self.profile}` 자동매매를 `{market}`에서 시작했습니다. 다음 판단 사이클부터 작동합니다.",
                 ephemeral=True,
             )
             await self.panel_message.edit(
