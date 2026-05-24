@@ -330,10 +330,10 @@ def test_rebate_micro_profile_uses_generic_scalper():
     assert strategy.params["entry_signal_required"] is True
     assert strategy.params["add_while_holding"] is False
     assert strategy.params["positive_ev_required"] is True
-    assert strategy.params["max_entry_spread_pct"] == 0.00025
+    assert strategy.params["max_entry_spread_pct"] == 0.00045
     assert strategy.params["fee_round_trip_pct"] == 0.0008
     assert strategy.params["rebate_round_trip_pct"] == 0.0008
-    assert strategy.params["min_expected_net_pct"] == 0.00002
+    assert strategy.params["min_expected_net_pct"] == 0.0
 
     print("  ✓ rebate_micro가 범용 PulseScalperStrategy로 연결됨")
     print("  ✓ 신호 기반 진입/+0.10~0.27% 동적 익절/-0.02% 손절/완화 EV 필터 설정 적용")

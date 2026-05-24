@@ -77,23 +77,23 @@ def rebate_strategy() -> PulseScalperStrategy:
             "max_position": 1.0,
             "add_while_holding": False,
             "entry_signal_required": True,
-            "min_micro_momentum": 0.00008,
-            "min_micro_volatility": 0.00006,
+            "min_micro_momentum": 0.00002,
+            "min_micro_volatility": 0.00002,
             "momentum_lookback": 3,
             "volatility_window": 8,
             "reversal_entry_enabled": True,
             "reversal_lookback": 8,
-            "reversal_min_rebound": 0.0005,
-            "breakout_tolerance": 0.0025,
+            "reversal_min_rebound": 0.00020,
+            "breakout_tolerance": 0.0060,
             "min_reentry_seconds": 3,
             "positive_ev_required": True,
-            "max_entry_spread_pct": 0.00025,
+            "max_entry_spread_pct": 0.00045,
             "fee_round_trip_pct": 0.0008,
             "rebate_round_trip_pct": 0.0008,
             "slippage_buffer_pct": 0.0002,
-            "min_expected_net_pct": 0.00002,
-            "min_take_profit_after_cost_pct": 0.00005,
-            "min_reward_to_risk": 0.75,
+            "min_expected_net_pct": 0.0,
+            "min_take_profit_after_cost_pct": 0.00001,
+            "min_reward_to_risk": 0.50,
         }
     )
 
@@ -256,7 +256,7 @@ def test_rebate_micro_blocks_wide_spread_entry():
             now=now,
             trade_price=100.30,
             closes=trending,
-            spread_pct=0.00030,
+            spread_pct=0.00050,
         )
     )
 
