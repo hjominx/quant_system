@@ -316,14 +316,18 @@ def strategy_params_for_profile(profile: str) -> dict:
             "label": "rebate micro",
             "buy_interval_seconds": 0,
             "min_exit_hold_seconds": 0,
-            "take_profit_pct": 0.0030,
-            "take_profit_min_pct": 0.0030,
-            "take_profit_max_pct": 0.0050,
-            "take_profit_vol_multiplier": 1.20,
-            "stop_loss_pct": 0.0035,
+            "take_profit_pct": 0.0015,
+            "take_profit_min_pct": 0.0015,
+            "take_profit_max_pct": 0.0015,
+            "take_profit_vol_multiplier": 1.0,
+            "stop_loss_pct": 0.0070,
             "max_position": 1.0,
             "required_history_days": 1,
             "add_while_holding": False,
+            "averaging_enabled": True,
+            "averaging_trigger_pct": 0.0020,
+            "averaging_order_krw": 20000,
+            "averaging_max_adds": 0,
             "entry_signal_required": True,
             "min_micro_momentum": 0.00002,
             "min_micro_volatility": 0.00002,
@@ -340,8 +344,8 @@ def strategy_params_for_profile(profile: str) -> dict:
             "rebate_round_trip_pct": 0.0008,
             "slippage_buffer_pct": 0.0002,
             "min_expected_net_pct": 0.0,
-            "min_take_profit_after_cost_pct": 0.0015,
-            "min_reward_to_risk": 0.50,
+            "min_take_profit_after_cost_pct": 0.0005,
+            "min_reward_to_risk": 0.15,
         }
     raise ValueError(f"지원하지 않는 profile: {profile}")
 
@@ -935,16 +939,40 @@ def build_pilot_plan(
     portfolio_value_krw = krw_balance + current_position_krw
 
     if decision.signal == Signal.BUY:
-        krw_amount = calculate_buy_amount(
-            target_weight=decision.target_weight,
-            portfolio_value_krw=portfolio_value_krw,
-            current_position_krw=current_position_krw,
-            krw_balance=krw_balance,
-            max_order_krw=max_order_krw,
-            max_position_krw=max_position_krw,
-            min_order_krw=min_order_krw,
-        )
+        if decision.order_krw is not None:
+            requested_order = quantize_krw(Decimal(str(decision.order_krw)))
+            remaining_position_cap = max_position_krw - current_position_krw
+            krw_amount = min(requested_order, remaining_position_cap, max_order_krw, krw_balance)
+            krw_amount = quantize_krw(max(krw_amount, Decimal("0")))
+            if krw_amount < min_order_krw:
+                krw_amount = Decimal("0")
+        else:
+            krw_amount = calculate_buy_amount(
+                target_weight=decision.target_weight,
+                portfolio_value_krw=portfolio_value_krw,
+                current_position_krw=current_position_krw,
+                krw_balance=krw_balance,
+                max_order_krw=max_order_krw,
+                max_position_krw=max_position_krw,
+                min_order_krw=min_order_krw,
+            )
         if krw_amount <= 0:
+            if "controlled averaging" in decision.reason:
+                sell_volume = calculate_sell_volume(
+                    coin_balance=coin_balance,
+                    trade_price=trade_price,
+                    min_order_krw=min_order_krw,
+                )
+                if sell_volume > 0:
+                    return PilotPlan(
+                        action="SELL",
+                        reason=(
+                            "averaging order blocked; sell all and stop auto trade | "
+                            f"{decision.reason}"
+                        ),
+                        volume=sell_volume,
+                        dry_run=dry_run,
+                    )
             return PilotPlan(
                 action="SKIP",
                 reason=(
@@ -1519,6 +1547,9 @@ def run_cycle(
             "now": now.isoformat(timespec="seconds"),
             "trade_price": float(ticker.trade_price),
             "spread_pct": float(orderbook.spread_pct),
+            "min_order_krw": float(args.min_order_krw),
+            "max_order_krw": float(args.max_order_krw),
+            "max_position_krw": float(args.max_position_krw),
         },
     )
     start_stop_required = runtime_profile.profile in START_STOP_PROFILES
@@ -1692,6 +1723,13 @@ def run_cycle(
                 target_krw=args.turnover_target_krw,
             )
             print(f"거래대금 진행률 업데이트: {format_rebate_turnover_progress(progress)}")
+        if (
+            runtime_profile.profile in START_STOP_PROFILES and
+            plan.action == "SELL" and
+            "stop auto trade" in plan.reason
+        ):
+            disable_auto_trade(Path(args.auto_trade_file))
+            print(f"자동거래 플래그 제거: {args.auto_trade_file}")
     notify_safely(
         notifier=notifier,
         embed=build_order_alert_embed(

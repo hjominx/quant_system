@@ -57,6 +57,10 @@ class PulseScalperStrategy(BaseStrategy):
         params.setdefault("min_expected_net_pct", 0.0)
         params.setdefault("min_take_profit_after_cost_pct", 0.0)
         params.setdefault("min_reward_to_risk", 0.0)
+        params.setdefault("averaging_enabled", False)
+        params.setdefault("averaging_trigger_pct", 0.0020)
+        params.setdefault("averaging_order_krw", 20_000)
+        params.setdefault("averaging_max_adds", 0)
         super().__init__(name="Pulse_Scalper", params=params)
 
     def _validate_params(self) -> None:
@@ -74,6 +78,9 @@ class PulseScalperStrategy(BaseStrategy):
         assert self.params["min_expected_net_pct"] >= 0
         assert self.params["min_take_profit_after_cost_pct"] >= 0
         assert self.params["min_reward_to_risk"] >= 0
+        assert self.params["averaging_trigger_pct"] > 0
+        assert self.params["averaging_order_krw"] > 0
+        assert self.params["averaging_max_adds"] >= 0
 
     def generate_signal(self, ctx: StrategyContext) -> TradeDecision:
         price = self._current_price(ctx)
@@ -112,6 +119,15 @@ class PulseScalperStrategy(BaseStrategy):
                     take_profit_pct=take_profit_pct,
                     stop_loss_pct=-self.params["stop_loss_pct"],
                 )
+            averaging = self._controlled_averaging_decision(
+                ctx,
+                price=price,
+                pnl=pnl,
+                seconds_since_buy=seconds_since_buy,
+                take_profit_pct=take_profit_pct,
+            )
+            if averaging is not None:
+                return averaging
             entry_allowed, entry_reason = self._entry_allowed(ctx, now)
             if buy_due and self.params["add_while_holding"] and entry_allowed:
                 return TradeDecision(
@@ -318,6 +334,81 @@ class PulseScalperStrategy(BaseStrategy):
             True,
             f"EV={expected_net:.3%}, TPnet={take_profit_after_cost:.3%}, "
             f"RR={reward_to_risk:.2f}, spread={spread_pct:.3%}",
+        )
+
+    def _controlled_averaging_decision(
+        self,
+        ctx: StrategyContext,
+        *,
+        price: float,
+        pnl: float,
+        seconds_since_buy: Optional[float],
+        take_profit_pct: float,
+    ) -> Optional[TradeDecision]:
+        """Add once drawdown is intentional; exit and stop if no add is possible."""
+        if not self.params["averaging_enabled"]:
+            return None
+        trigger = float(self.params["averaging_trigger_pct"])
+        if pnl > -trigger:
+            return None
+
+        count = int(ctx.metadata.get("averaging_count", 0) or 0)
+        max_adds = int(self.params["averaging_max_adds"])
+        if max_adds > 0 and count >= max_adds:
+            return TradeDecision(
+                signal=Signal.SELL,
+                target_weight=0.0,
+                reason=self._reason(
+                    ctx.ticker,
+                    f"averaging max reached; stop auto trade; adds={count}/{max_adds}",
+                    price,
+                    pnl,
+                    seconds_since_buy,
+                    take_profit_pct,
+                ),
+                confidence=1.0,
+                take_profit_pct=take_profit_pct,
+                stop_loss_pct=-self.params["stop_loss_pct"],
+            )
+
+        order_krw = float(self.params["averaging_order_krw"])
+        min_order_krw = float(ctx.metadata.get("min_order_krw", 0.0) or 0.0)
+        required_cash = max(order_krw, min_order_krw)
+        if float(ctx.cash) + EPSILON < required_cash:
+            return TradeDecision(
+                signal=Signal.SELL,
+                target_weight=0.0,
+                reason=self._reason(
+                    ctx.ticker,
+                    (
+                        "averaging cash unavailable; stop auto trade; "
+                        f"cash={float(ctx.cash):.0f}<required={required_cash:.0f}"
+                    ),
+                    price,
+                    pnl,
+                    seconds_since_buy,
+                    take_profit_pct,
+                ),
+                confidence=1.0,
+                take_profit_pct=take_profit_pct,
+                stop_loss_pct=-self.params["stop_loss_pct"],
+            )
+
+        return TradeDecision(
+            signal=Signal.BUY,
+            target_weight=self.params["max_position"],
+            reason=self._reason(
+                ctx.ticker,
+                f"controlled averaging add #{count + 1} on drawdown",
+                price,
+                pnl,
+                seconds_since_buy,
+                take_profit_pct,
+            ),
+            confidence=1.0,
+            take_profit_pct=take_profit_pct,
+            stop_loss_pct=-self.params["stop_loss_pct"],
+            order_krw=order_krw,
         )
 
     def _take_profit_pct(self, ctx: StrategyContext) -> float:

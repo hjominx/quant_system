@@ -47,6 +47,7 @@ class TradeDecision:
     confidence: float = 1.0  # 신호 강도 (0.0 ~ 1.0, 포지션 사이징에 사용)
     stop_loss_pct: Optional[float] = None  # 손절 라인 (예: -0.05)
     take_profit_pct: Optional[float] = None  # 익절 라인
+    order_krw: Optional[float] = None  # 전략이 요청한 고정 KRW 주문액
 
 
 class BaseStrategy(ABC):

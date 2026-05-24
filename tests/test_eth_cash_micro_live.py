@@ -190,6 +190,43 @@ def test_plan_builder_never_exceeds_caps():
     assert plan.krw_amount == Decimal("10000")
     assert plan.dry_run is True
 
+    averaging_plan = build_pilot_plan(
+        decision=TradeDecision(
+            signal=Signal.BUY,
+            target_weight=1.0,
+            reason="controlled averaging add #1",
+            order_krw=20000,
+        ),
+        balances=make_balances(krw="100000", eth="0.01"),
+        trade_price=Decimal("4000000"),
+        market="KRW-ETH",
+        max_order_krw=Decimal("100000"),
+        max_position_krw=Decimal("200000"),
+        min_order_krw=Decimal("5000"),
+        dry_run=True,
+    )
+    assert averaging_plan.action == "BUY"
+    assert averaging_plan.krw_amount == Decimal("20000")
+
+    blocked_averaging_plan = build_pilot_plan(
+        decision=TradeDecision(
+            signal=Signal.BUY,
+            target_weight=1.0,
+            reason="controlled averaging add #2",
+            order_krw=20000,
+        ),
+        balances=make_balances(krw="3000", eth="0.02"),
+        trade_price=Decimal("4000000"),
+        market="KRW-ETH",
+        max_order_krw=Decimal("100000"),
+        max_position_krw=Decimal("200000"),
+        min_order_krw=Decimal("5000"),
+        dry_run=True,
+    )
+    assert blocked_averaging_plan.action == "SELL"
+    assert blocked_averaging_plan.volume == Decimal("0.02000000")
+    assert "stop auto trade" in blocked_averaging_plan.reason
+
     sell_plan = build_pilot_plan(
         decision=TradeDecision(
             signal=Signal.SELL,
@@ -324,9 +361,12 @@ def test_rebate_micro_profile_uses_generic_scalper():
     assert isinstance(strategy, PulseScalperStrategy)
     assert strategy.params["buy_interval_seconds"] == 0
     assert strategy.params["min_exit_hold_seconds"] == 0
-    assert strategy.params["take_profit_min_pct"] == 0.0030
-    assert strategy.params["take_profit_max_pct"] == 0.0050
-    assert strategy.params["stop_loss_pct"] == 0.0035
+    assert strategy.params["take_profit_min_pct"] == 0.0015
+    assert strategy.params["take_profit_max_pct"] == 0.0015
+    assert strategy.params["stop_loss_pct"] == 0.0070
+    assert strategy.params["averaging_enabled"] is True
+    assert strategy.params["averaging_trigger_pct"] == 0.0020
+    assert strategy.params["averaging_order_krw"] == 20000
     assert strategy.params["entry_signal_required"] is True
     assert strategy.params["add_while_holding"] is False
     assert strategy.params["positive_ev_required"] is True
@@ -336,7 +376,7 @@ def test_rebate_micro_profile_uses_generic_scalper():
     assert strategy.params["min_expected_net_pct"] == 0.0
 
     print("  ✓ rebate_micro가 범용 PulseScalperStrategy로 연결됨")
-    print("  ✓ 신호 기반 진입/+0.30~0.50% 동적 익절/-0.35% 손절/큰 손익폭 설정 적용")
+    print("  ✓ 신호 기반 진입/+0.15% 익절/-0.20% 추매/-0.70% 손절 설정 적용")
 
 
 def test_runtime_profile_mode_file_switches_stable_and_scalp():
