@@ -770,7 +770,10 @@ class ControlPanelView(discord.ui.View):
         if not await self._require_admin(interaction):
             return
         await interaction.response.send_message(
-            "Rebate Micro 자동매매를 시작할까요? 선택 마켓에서 TP +0.01%, SL -0.02% 모델이 다음 사이클부터 작동합니다.",
+            (
+                "Rebate Micro 자동매매를 시작할까요? 선택 마켓에서 1분봉 마이크로 신호가 있을 때만 "
+                "진입하고, +0.03~1.00% 동적 익절 / -0.04% 손절 모델이 다음 사이클부터 작동합니다."
+            ),
             view=ConfirmStartMicroView(self.controller, interaction.message),
             ephemeral=True,
         )

@@ -134,8 +134,9 @@ ETH/Cash Regime은 2024년 말 이후 ETH 단순보유가 크게 흔들린 구�
 - 더 공격적인 소액 실험은 `--profile aggressive4h`를 사용하며, RSI 저점 탐색 진입과 더 높은 ETH 목표 비중을 허용
 - `--profile stable_quality`는 4시간봉 방어형 적응 알파, `--profile scalp_active`는 5분봉 스캘핑, `--profile scalp_1m`은 1분봉 초공격 스캘핑 파일럿
 - `--profile pulse_10s`는 선택한 KRW 알트 마켓에서 1초마다 판단하고, 10분마다 최대 100,000원 pulse 매수를 시작하며, 매수 3초 후부터 +0.30% 익절 / -0.04% 손절을 감시
-- `--profile rebate_micro`는 선택한 KRW 알트 마켓에서 시작/중지 버튼으로만 켜지는 초단기 모델이며, 자동 반복 진입 후 +0.01% 익절 / -0.02% 손절을 감시
+- `--profile rebate_micro`는 선택한 KRW 알트 마켓에서 시작/중지 버튼으로만 켜지는 초단기 모델이며, 1분봉 마이크로 신호가 있을 때만 빠르게 진입하고 +0.03%~+1.00% 동적 익절 / -0.04% 하드 손절을 감시
 - Rebate Micro의 `Recommend` 버튼은 유동성, 호가 스프레드, 1분봉 단기 변동성, 모멘텀/반전 신호, 비용 이후 기대값을 점수화해 후보를 띄우고, 선택한 종목에서만 자동매매를 시작
+- Rebate Micro는 무조건 왕복거래하지 않고, 매도 직후 짧은 재진입 가드와 신호 필터를 둬 과도한 반복 왕복 주문을 줄임
 - Discord 컨트롤 봇은 `logs/eth_cash_live_profile.json`을 바꿔 Stable/Scalp 5m/Scalp 1m/Pulse/Rebate Micro 모드를 다음 사이클부터 전환하고, 선택형 시장은 `logs/pulse_market.json` 또는 `Set Market` 버튼으로 변경
 - 스캘핑 모드는 손실 중에도 추세/변동성/RSI 조건이 살아 있으면 최대 2회까지만 제한 추매하고, 평균단가 기준 익절과 하드 손절을 유지
 - 계좌 위험 게이트가 일일 손실, 주간 손실, MDD, 킬스위치 파일(`logs/KILL_SWITCH_ACTIVE`)을 주문 직전에 강제

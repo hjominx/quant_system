@@ -122,6 +122,7 @@ class PilotState:
     orders_today: int = 0
     last_order_at: Optional[str] = None
     last_pulse_buy_at: Optional[str] = None
+    last_action: Optional[str] = None
     last_status_alert_at: Optional[str] = None
     averaging_count: int = 0
 
@@ -315,10 +316,24 @@ def strategy_params_for_profile(profile: str) -> dict:
             "label": "rebate micro",
             "buy_interval_seconds": 0,
             "min_exit_hold_seconds": 0,
-            "take_profit_pct": 0.0001,
-            "stop_loss_pct": 0.0002,
+            "take_profit_pct": 0.0003,
+            "take_profit_min_pct": 0.0003,
+            "take_profit_max_pct": 0.0100,
+            "take_profit_vol_multiplier": 1.20,
+            "stop_loss_pct": 0.0004,
             "max_position": 1.0,
             "required_history_days": 1,
+            "add_while_holding": False,
+            "entry_signal_required": True,
+            "min_micro_momentum": 0.00015,
+            "min_micro_volatility": 0.00010,
+            "momentum_lookback": 3,
+            "volatility_window": 8,
+            "reversal_entry_enabled": True,
+            "reversal_lookback": 8,
+            "reversal_min_rebound": 0.0008,
+            "breakout_tolerance": 0.0015,
+            "min_reentry_seconds": 3,
         }
     raise ValueError(f"지원하지 않는 profile: {profile}")
 
@@ -641,6 +656,7 @@ def load_pilot_state(path: Path, now: datetime) -> PilotState:
         orders_today=int(raw.get("orders_today", 0)),
         last_order_at=raw.get("last_order_at"),
         last_pulse_buy_at=raw.get("last_pulse_buy_at"),
+        last_action=raw.get("last_action"),
         last_status_alert_at=raw.get("last_status_alert_at"),
         averaging_count=int(raw.get("averaging_count", 0)),
     )
@@ -659,6 +675,7 @@ def save_pilot_state(path: Path, state: PilotState) -> None:
                 "orders_today": state.orders_today,
                 "last_order_at": state.last_order_at,
                 "last_pulse_buy_at": state.last_pulse_buy_at,
+                "last_action": state.last_action,
                 "last_status_alert_at": state.last_status_alert_at,
                 "averaging_count": state.averaging_count,
             },
@@ -725,6 +742,7 @@ def record_order(
         orders_today=orders_today + 1,
         last_order_at=now.isoformat(timespec="seconds"),
         last_pulse_buy_at=last_pulse_buy_at,
+        last_action=action,
         last_status_alert_at=state.last_status_alert_at,
         averaging_count=averaging_count,
     )
@@ -739,6 +757,7 @@ def record_status_alert(state: PilotState, now: datetime) -> PilotState:
         orders_today=orders_today,
         last_order_at=state.last_order_at,
         last_pulse_buy_at=state.last_pulse_buy_at if state.date == today else None,
+        last_action=state.last_action if state.date == today else None,
         last_status_alert_at=now.isoformat(timespec="seconds"),
         averaging_count=state.averaging_count if state.date == today else 0,
     )
@@ -1447,6 +1466,7 @@ def run_cycle(
             orders_today=state.orders_today,
             last_order_at=state.last_order_at,
             last_pulse_buy_at=state.last_pulse_buy_at,
+            last_action=state.last_action,
             last_status_alert_at=state.last_status_alert_at,
             averaging_count=0,
         )
@@ -1479,6 +1499,8 @@ def run_cycle(
             "profile": runtime_profile.profile,
             "averaging_count": state.averaging_count,
             "last_pulse_buy_at": state.last_pulse_buy_at,
+            "last_order_at": state.last_order_at,
+            "last_action": state.last_action,
             "now": now.isoformat(timespec="seconds"),
             "trade_price": float(ticker.trade_price),
         },
@@ -1530,6 +1552,7 @@ def run_cycle(
     print(f"추매 카운트: {state.averaging_count}")
     if runtime_profile.profile in SELECTABLE_MARKET_PROFILES:
         print(f"마지막 micro 매수: {state.last_pulse_buy_at or '없음'}")
+        print(f"마지막 주문 방향: {state.last_action or '없음'}")
     if start_stop_required:
         print(f"자동거래: {'enabled' if start_stop_enabled else 'stopped'}")
     if runtime_profile.profile == "rebate_micro":

@@ -27,9 +27,12 @@ Current pilot profile:
   market, starts TP/SL checks 3 seconds after each pulse buy, and uses
   +0.30% take-profit / -0.04% stop-loss.
 - Rebate Micro mode is enabled only while `logs/AUTO_TRADE_ENABLED` exists.
-  It attempts continuous selected-market micro entries with +0.01%
-  take-profit and -0.02% stop-loss, while still respecting spread, risk,
-  kill switch, open-order, position, and daily order gates.
+  It attempts fast selected-market micro entries only when the 1m micro
+  signal filter is active, uses dynamic +0.03% to +1.00% take-profit and
+  -0.04% hard stop-loss, and still respects spread, risk, kill switch,
+  open-order, position, and daily order gates.
+- Rebate Micro avoids pure churn by disabling add-while-holding and adding
+  a short post-sell reentry guard before opening a new position.
 - The Discord `Recommend` button scans KRW markets by liquidity, spread, 1m
   short volatility, momentum/reversal signal, and estimated post-cost edge.
   Candidate buttons can start the selected market normally or with a

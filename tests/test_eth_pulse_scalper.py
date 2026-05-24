@@ -18,17 +18,22 @@ def make_context(
     current_position: float = 0.0,
     avg_buy_price: float = 0.0,
     last_pulse_buy_at: datetime | None = None,
+    last_order_at: datetime | None = None,
+    last_action: str | None = None,
+    closes: list[float] | None = None,
 ) -> StrategyContext:
     """Create a tiny live-like context using ticker price metadata."""
+    values = closes or [trade_price]
+    index = [now - timedelta(minutes=len(values) - idx - 1) for idx in range(len(values))]
     ohlcv = pd.DataFrame(
         {
-            "open": [trade_price],
-            "high": [trade_price],
-            "low": [trade_price],
-            "close": [trade_price],
-            "volume": [1.0],
+            "open": values,
+            "high": values,
+            "low": values,
+            "close": values,
+            "volume": [1.0 for _ in values],
         },
-        index=[now],
+        index=index,
     )
     return StrategyContext(
         timestamp=now,
@@ -46,7 +51,40 @@ def make_context(
                 if last_pulse_buy_at
                 else None
             ),
+            "last_order_at": (
+                last_order_at.isoformat(timespec="seconds")
+                if last_order_at
+                else None
+            ),
+            "last_action": last_action,
         },
+    )
+
+
+def rebate_strategy() -> PulseScalperStrategy:
+    return PulseScalperStrategy(
+        params={
+            "label": "rebate micro",
+            "buy_interval_seconds": 0,
+            "min_exit_hold_seconds": 0,
+            "take_profit_pct": 0.0003,
+            "take_profit_min_pct": 0.0003,
+            "take_profit_max_pct": 0.0100,
+            "take_profit_vol_multiplier": 1.20,
+            "stop_loss_pct": 0.0004,
+            "max_position": 1.0,
+            "add_while_holding": False,
+            "entry_signal_required": True,
+            "min_micro_momentum": 0.00015,
+            "min_micro_volatility": 0.00010,
+            "momentum_lookback": 3,
+            "volatility_window": 8,
+            "reversal_entry_enabled": True,
+            "reversal_lookback": 8,
+            "reversal_min_rebound": 0.0008,
+            "breakout_tolerance": 0.0015,
+            "min_reentry_seconds": 3,
+        }
     )
 
 
@@ -165,6 +203,99 @@ def test_pulse_does_not_exit_before_three_seconds():
     print("  ✓ 매수 후 3초 전에는 TP/SL 청산을 시작하지 않음")
 
 
+def test_rebate_micro_requires_micro_edge_before_entry():
+    print("\n[테스트 7] Rebate Micro 신호 기반 진입")
+    print("-" * 60)
+
+    strategy = rebate_strategy()
+    now = datetime(2026, 5, 23, 9, 0, 0)
+    flat = [100.0 for _ in range(10)]
+    decision = strategy.generate_signal(
+        make_context(now=now, trade_price=100.0, closes=flat)
+    )
+
+    assert decision.signal == Signal.HOLD
+    assert "entry wait" in decision.reason
+
+    trending = [
+        100.00, 100.03, 100.01, 100.05, 100.09,
+        100.07, 100.12, 100.18, 100.23, 100.30,
+    ]
+    decision = strategy.generate_signal(
+        make_context(now=now, trade_price=100.30, closes=trending)
+    )
+
+    assert decision.signal == Signal.BUY
+    assert "pulse entry" in decision.reason
+    print("  ✓ 무조건 진입이 아니라 1분봉 변동성/모멘텀 조건 통과 시에만 진입")
+
+
+def test_rebate_micro_dynamic_take_profit_and_stop():
+    print("\n[테스트 8] Rebate Micro 동적 익절/하드 손절")
+    print("-" * 60)
+
+    strategy = rebate_strategy()
+    now = datetime(2026, 5, 23, 9, 0, 1)
+    closes = [
+        100.00, 100.06, 100.02, 100.10, 100.15,
+        100.11, 100.20, 100.28, 100.36, 100.44,
+    ]
+    decision = strategy.generate_signal(
+        make_context(
+            now=now,
+            trade_price=100.08,
+            current_position=10.0,
+            avg_buy_price=100.0,
+            last_pulse_buy_at=now - timedelta(seconds=1),
+            closes=closes,
+        )
+    )
+
+    assert decision.signal == Signal.SELL
+    assert "take-profit" in decision.reason
+    assert 0.0003 <= decision.take_profit_pct <= 0.0100
+
+    decision = strategy.generate_signal(
+        make_context(
+            now=now,
+            trade_price=99.95,
+            current_position=10.0,
+            avg_buy_price=100.0,
+            last_pulse_buy_at=now - timedelta(seconds=1),
+            closes=closes,
+        )
+    )
+
+    assert decision.signal == Signal.SELL
+    assert "stop-loss" in decision.reason
+    print("  ✓ 익절은 0.03~1.00% 범위, 손절은 -0.04% 기준으로 작동")
+
+
+def test_rebate_micro_reentry_guard_after_sell():
+    print("\n[테스트 9] Rebate Micro 재진입 가드")
+    print("-" * 60)
+
+    strategy = rebate_strategy()
+    now = datetime(2026, 5, 23, 9, 0, 1)
+    trending = [
+        100.00, 100.03, 100.01, 100.05, 100.09,
+        100.07, 100.12, 100.18, 100.23, 100.30,
+    ]
+    decision = strategy.generate_signal(
+        make_context(
+            now=now,
+            trade_price=100.30,
+            closes=trending,
+            last_order_at=now - timedelta(seconds=1),
+            last_action="SELL",
+        )
+    )
+
+    assert decision.signal == Signal.HOLD
+    assert "reentry guard" in decision.reason
+    print("  ✓ 매도 직후 즉시 재매수 반복을 막아 과도한 왕복 패턴을 줄임")
+
+
 def main():
     print("=" * 60)
     print("Pulse Scalper 테스트")
@@ -177,6 +308,9 @@ def main():
         test_pulse_takes_profit_from_live_ticker,
         test_pulse_stops_loss_from_live_ticker,
         test_pulse_does_not_exit_before_three_seconds,
+        test_rebate_micro_requires_micro_edge_before_entry,
+        test_rebate_micro_dynamic_take_profit_and_stop,
+        test_rebate_micro_reentry_guard_after_sell,
     ]
 
     passed = 0
