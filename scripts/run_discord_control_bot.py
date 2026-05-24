@@ -795,7 +795,7 @@ class ControlPanelView(discord.ui.View):
         await interaction.response.send_message(
             (
                 "Rebate Micro 자동매매를 시작할까요? 선택 마켓에서 1분봉 마이크로 신호가 있을 때만 "
-                "진입하고, +0.10~0.27% 동적 익절 / -0.02% 손절 모델이 다음 사이클부터 작동합니다."
+                "진입하고, +0.30~0.50% 동적 익절 / -0.35% 손절 모델이 다음 사이클부터 작동합니다."
             ),
             view=ConfirmStartMicroView(self.controller, interaction.message),
             ephemeral=True,

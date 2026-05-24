@@ -324,9 +324,9 @@ def test_rebate_micro_profile_uses_generic_scalper():
     assert isinstance(strategy, PulseScalperStrategy)
     assert strategy.params["buy_interval_seconds"] == 0
     assert strategy.params["min_exit_hold_seconds"] == 0
-    assert strategy.params["take_profit_min_pct"] == 0.0010
-    assert strategy.params["take_profit_max_pct"] == 0.0027
-    assert strategy.params["stop_loss_pct"] == 0.0002
+    assert strategy.params["take_profit_min_pct"] == 0.0030
+    assert strategy.params["take_profit_max_pct"] == 0.0050
+    assert strategy.params["stop_loss_pct"] == 0.0035
     assert strategy.params["entry_signal_required"] is True
     assert strategy.params["add_while_holding"] is False
     assert strategy.params["positive_ev_required"] is True
@@ -336,7 +336,7 @@ def test_rebate_micro_profile_uses_generic_scalper():
     assert strategy.params["min_expected_net_pct"] == 0.0
 
     print("  ✓ rebate_micro가 범용 PulseScalperStrategy로 연결됨")
-    print("  ✓ 신호 기반 진입/+0.10~0.27% 동적 익절/-0.02% 손절/완화 EV 필터 설정 적용")
+    print("  ✓ 신호 기반 진입/+0.30~0.50% 동적 익절/-0.35% 손절/큰 손익폭 설정 적용")
 
 
 def test_runtime_profile_mode_file_switches_stable_and_scalp():

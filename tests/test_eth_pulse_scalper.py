@@ -69,11 +69,11 @@ def rebate_strategy() -> PulseScalperStrategy:
             "label": "rebate micro",
             "buy_interval_seconds": 0,
             "min_exit_hold_seconds": 0,
-            "take_profit_pct": 0.0010,
-            "take_profit_min_pct": 0.0010,
-            "take_profit_max_pct": 0.0027,
+            "take_profit_pct": 0.0030,
+            "take_profit_min_pct": 0.0030,
+            "take_profit_max_pct": 0.0050,
             "take_profit_vol_multiplier": 1.20,
-            "stop_loss_pct": 0.0002,
+            "stop_loss_pct": 0.0035,
             "max_position": 1.0,
             "add_while_holding": False,
             "entry_signal_required": True,
@@ -92,7 +92,7 @@ def rebate_strategy() -> PulseScalperStrategy:
             "rebate_round_trip_pct": 0.0008,
             "slippage_buffer_pct": 0.0002,
             "min_expected_net_pct": 0.0,
-            "min_take_profit_after_cost_pct": 0.00001,
+            "min_take_profit_after_cost_pct": 0.0015,
             "min_reward_to_risk": 0.50,
         }
     )
@@ -298,7 +298,7 @@ def test_rebate_micro_dynamic_take_profit_and_stop():
     decision = strategy.generate_signal(
         make_context(
             now=now,
-            trade_price=100.12,
+            trade_price=100.31,
             current_position=10.0,
             avg_buy_price=100.0,
             last_pulse_buy_at=now - timedelta(seconds=1),
@@ -308,12 +308,12 @@ def test_rebate_micro_dynamic_take_profit_and_stop():
 
     assert decision.signal == Signal.SELL
     assert "take-profit" in decision.reason
-    assert 0.0010 <= decision.take_profit_pct <= 0.0027
+    assert 0.0030 <= decision.take_profit_pct <= 0.0050
 
     decision = strategy.generate_signal(
         make_context(
             now=now,
-            trade_price=99.95,
+            trade_price=99.60,
             current_position=10.0,
             avg_buy_price=100.0,
             last_pulse_buy_at=now - timedelta(seconds=1),
@@ -323,11 +323,11 @@ def test_rebate_micro_dynamic_take_profit_and_stop():
 
     assert decision.signal == Signal.SELL
     assert "stop-loss" in decision.reason
-    print("  ✓ 익절은 0.10~0.27% 범위, 손절은 -0.02% 기준으로 작동")
+    print("  ✓ 익절은 0.30~0.50% 범위, 손절은 -0.35% 기준으로 작동")
 
 
-def test_rebate_micro_caps_take_profit_at_027_pct():
-    print("\n[테스트 11] Rebate Micro 0.27% 즉시 익절")
+def test_rebate_micro_caps_take_profit_at_050_pct():
+    print("\n[테스트 11] Rebate Micro 0.50% 즉시 익절")
     print("-" * 60)
 
     strategy = rebate_strategy()
@@ -339,7 +339,7 @@ def test_rebate_micro_caps_take_profit_at_027_pct():
     decision = strategy.generate_signal(
         make_context(
             now=now,
-            trade_price=100.27,
+            trade_price=100.50,
             current_position=10.0,
             avg_buy_price=100.0,
             last_pulse_buy_at=now - timedelta(seconds=1),
@@ -349,8 +349,8 @@ def test_rebate_micro_caps_take_profit_at_027_pct():
 
     assert decision.signal == Signal.SELL
     assert "take-profit" in decision.reason
-    assert decision.take_profit_pct == 0.0027
-    print("  ✓ 동적 목표가 높아도 +0.27% 이상이면 즉시 익절")
+    assert decision.take_profit_pct == 0.0050
+    print("  ✓ 동적 목표가 높아도 +0.50% 이상이면 즉시 익절")
 
 
 def test_rebate_micro_reentry_guard_after_sell():
@@ -394,7 +394,7 @@ def main():
         test_rebate_micro_blocks_wide_spread_entry,
         test_rebate_micro_requires_positive_post_rebate_ev,
         test_rebate_micro_dynamic_take_profit_and_stop,
-        test_rebate_micro_caps_take_profit_at_027_pct,
+        test_rebate_micro_caps_take_profit_at_050_pct,
         test_rebate_micro_reentry_guard_after_sell,
     ]
 

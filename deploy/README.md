@@ -28,8 +28,8 @@ Current pilot profile:
   +0.30% take-profit / -0.04% stop-loss.
 - Rebate Micro mode is enabled only while `logs/AUTO_TRADE_ENABLED` exists.
   It attempts fast selected-market micro entries only when the 1m micro
-  signal filter is active, uses dynamic +0.10% to +0.27% take-profit and
-  -0.02% hard stop-loss, and still respects spread, kill switch,
+  signal filter is active, uses dynamic +0.30% to +0.50% take-profit and
+  -0.35% hard stop-loss, and still respects spread, kill switch,
   open-order, position, and daily order gates.
 - Before each Rebate Micro BUY, the strategy estimates post-rebate expected
   edge from spread, round-trip fee, rebate, slippage buffer, micro momentum,
