@@ -480,15 +480,22 @@ def test_night_micro_profile_uses_limit_averaging_scalper():
     strategy = build_strategy_for_profile("night_micro")
 
     assert isinstance(strategy, PulseScalperStrategy)
-    assert strategy.params["take_profit_min_pct"] == 0.0015
-    assert strategy.params["take_profit_max_pct"] == 0.0015
+    assert strategy.params["take_profit_min_pct"] == 0.0010
+    assert strategy.params["take_profit_max_pct"] == 0.0010
     assert strategy.params["stop_loss_pct"] == 0.0070
     assert strategy.params["averaging_enabled"] is True
     assert strategy.params["averaging_trigger_pct"] == 0.0020
+    assert strategy.params["averaging_second_trigger_pct"] == 0.0035
     assert strategy.params["averaging_order_krw"] == 20000
+    assert strategy.params["averaging_max_adds"] == 2
+    assert strategy.params["tick_mode_enabled"] is True
+    assert strategy.params["take_profit_min_ticks"] == 10
+    assert strategy.params["averaging_min_ticks"] == 10
+    assert strategy.params["averaging_second_min_ticks"] == 18
+    assert strategy.params["stop_loss_min_ticks"] == 30
     assert strategy.params["positive_ev_required"] is True
 
-    print("  ✓ night_micro가 +0.15% 익절/-0.20% 추매/-0.70% 손절 프로필로 분리됨")
+    print("  ✓ night_micro가 +0.10%와 10~30틱 기준을 함께 쓰는 프로필로 분리됨")
 
 
 def test_runtime_profile_mode_file_switches_stable_and_scalp():

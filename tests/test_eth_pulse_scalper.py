@@ -25,6 +25,7 @@ def make_context(
     cash: float = 200_000.0,
     averaging_count: int = 0,
     min_order_krw: float = 5_000.0,
+    tick_size_krw: float = 0.01,
 ) -> StrategyContext:
     """Create a tiny live-like context using ticker price metadata."""
     values = closes or [trade_price]
@@ -62,29 +63,38 @@ def make_context(
             ),
             "last_action": last_action,
             "spread_pct": spread_pct,
+            "tick_size_krw": tick_size_krw,
             "averaging_count": averaging_count,
             "min_order_krw": min_order_krw,
         },
     )
 
 
-def rebate_strategy() -> PulseScalperStrategy:
+def night_strategy() -> PulseScalperStrategy:
     return PulseScalperStrategy(
         params={
-            "label": "rebate micro",
+            "label": "night micro",
             "buy_interval_seconds": 0,
             "min_exit_hold_seconds": 0,
-            "take_profit_pct": 0.0015,
-            "take_profit_min_pct": 0.0015,
-            "take_profit_max_pct": 0.0015,
+            "take_profit_pct": 0.0010,
+            "take_profit_min_pct": 0.0010,
+            "take_profit_max_pct": 0.0010,
             "take_profit_vol_multiplier": 1.0,
             "stop_loss_pct": 0.0070,
             "max_position": 1.0,
             "add_while_holding": False,
             "averaging_enabled": True,
             "averaging_trigger_pct": 0.0020,
+            "averaging_second_trigger_pct": 0.0035,
             "averaging_order_krw": 20000,
-            "averaging_max_adds": 0,
+            "averaging_max_adds": 2,
+            "tick_mode_enabled": True,
+            "take_profit_min_ticks": 10,
+            "averaging_min_ticks": 10,
+            "averaging_second_min_ticks": 18,
+            "stop_loss_min_ticks": 30,
+            "tick_band_min_10tick_pct": 0.0010,
+            "tick_band_max_10tick_pct": 0.0060,
             "entry_signal_required": True,
             "min_micro_momentum": 0.00002,
             "min_micro_volatility": 0.00002,
@@ -222,11 +232,11 @@ def test_pulse_does_not_exit_before_three_seconds():
     print("  ✓ 매수 후 3초 전에는 TP/SL 청산을 시작하지 않음")
 
 
-def test_rebate_micro_requires_micro_edge_before_entry():
-    print("\n[테스트 7] Rebate Micro 신호 기반 진입")
+def test_night_micro_requires_micro_edge_before_entry():
+    print("\n[테스트 7] Night Micro 신호 기반 진입")
     print("-" * 60)
 
-    strategy = rebate_strategy()
+    strategy = night_strategy()
     now = datetime(2026, 5, 23, 9, 0, 0)
     flat = [100.0 for _ in range(10)]
     decision = strategy.generate_signal(
@@ -241,7 +251,7 @@ def test_rebate_micro_requires_micro_edge_before_entry():
         100.07, 100.12, 100.18, 100.23, 100.30,
     ]
     decision = strategy.generate_signal(
-        make_context(now=now, trade_price=100.30, closes=trending)
+        make_context(now=now, trade_price=100.30, closes=trending, tick_size_krw=0.02)
     )
 
     assert decision.signal == Signal.BUY
@@ -250,11 +260,11 @@ def test_rebate_micro_requires_micro_edge_before_entry():
     print("  ✓ 무조건 진입이 아니라 1분봉 변동성/모멘텀 조건 통과 시에만 진입")
 
 
-def test_rebate_micro_blocks_wide_spread_entry():
-    print("\n[테스트 8] Rebate Micro 스프레드 차단")
+def test_night_micro_blocks_wide_spread_entry():
+    print("\n[테스트 8] Night Micro 스프레드 차단")
     print("-" * 60)
 
-    strategy = rebate_strategy()
+    strategy = night_strategy()
     now = datetime(2026, 5, 23, 9, 0, 0)
     trending = [
         100.00, 100.03, 100.01, 100.05, 100.09,
@@ -266,6 +276,7 @@ def test_rebate_micro_blocks_wide_spread_entry():
             trade_price=100.30,
             closes=trending,
             spread_pct=0.00050,
+            tick_size_krw=0.02,
         )
     )
 
@@ -274,11 +285,11 @@ def test_rebate_micro_blocks_wide_spread_entry():
     print("  ✓ 신호가 있어도 스프레드가 넓으면 진입하지 않음")
 
 
-def test_rebate_micro_requires_positive_post_rebate_ev():
-    print("\n[테스트 9] Rebate Micro 페이백 감안 기대값")
+def test_night_micro_requires_positive_post_rebate_ev():
+    print("\n[테스트 9] Night Micro 페이백 감안 기대값")
     print("-" * 60)
 
-    strategy = rebate_strategy()
+    strategy = night_strategy()
     strategy.params["min_expected_net_pct"] = 0.0020
     now = datetime(2026, 5, 23, 9, 0, 0)
     trending = [
@@ -286,7 +297,7 @@ def test_rebate_micro_requires_positive_post_rebate_ev():
         100.07, 100.12, 100.18, 100.23, 100.30,
     ]
     decision = strategy.generate_signal(
-        make_context(now=now, trade_price=100.30, closes=trending)
+        make_context(now=now, trade_price=100.30, closes=trending, tick_size_krw=0.02)
     )
 
     assert decision.signal == Signal.HOLD
@@ -294,11 +305,11 @@ def test_rebate_micro_requires_positive_post_rebate_ev():
     print("  ✓ 페이백을 감안해도 기대값 버퍼가 부족하면 진입하지 않음")
 
 
-def test_rebate_micro_take_profit_and_hard_stop():
-    print("\n[테스트 10] Rebate Micro 고정 익절/하드 손절")
+def test_night_micro_take_profit_and_hard_stop():
+    print("\n[테스트 10] Night Micro 틱 기반 익절/하드 손절")
     print("-" * 60)
 
-    strategy = rebate_strategy()
+    strategy = night_strategy()
     now = datetime(2026, 5, 23, 9, 0, 1)
     closes = [
         100.00, 100.06, 100.02, 100.10, 100.15,
@@ -317,7 +328,34 @@ def test_rebate_micro_take_profit_and_hard_stop():
 
     assert decision.signal == Signal.SELL
     assert "take-profit" in decision.reason
-    assert decision.take_profit_pct == 0.0015
+    assert decision.take_profit_pct == 0.0010
+
+    eth_hold = strategy.generate_signal(
+        make_context(
+            now=now,
+            trade_price=3_003_000.0,
+            current_position=0.03,
+            avg_buy_price=3_000_000.0,
+            last_pulse_buy_at=now - timedelta(seconds=1),
+            closes=[3_000_000.0 + idx * 500 for idx in range(10)],
+            tick_size_krw=1000.0,
+        )
+    )
+    assert eth_hold.signal == Signal.HOLD
+
+    eth_take_profit = strategy.generate_signal(
+        make_context(
+            now=now,
+            trade_price=3_010_000.0,
+            current_position=0.03,
+            avg_buy_price=3_000_000.0,
+            last_pulse_buy_at=now - timedelta(seconds=1),
+            closes=[3_000_000.0 + idx * 500 for idx in range(10)],
+            tick_size_krw=1000.0,
+        )
+    )
+    assert eth_take_profit.signal == Signal.SELL
+    assert eth_take_profit.take_profit_pct > 0.003
 
     decision = strategy.generate_signal(
         make_context(
@@ -332,14 +370,14 @@ def test_rebate_micro_take_profit_and_hard_stop():
 
     assert decision.signal == Signal.SELL
     assert "stop-loss" in decision.reason
-    print("  ✓ 익절은 +0.15%, 하드 손절은 -0.70% 기준으로 작동")
+    print("  ✓ 익절은 +0.10%와 10틱을 모두 넘을 때, 하드 손절은 -0.70%와 30틱 기준으로 작동")
 
 
-def test_rebate_micro_averages_after_020_pct_drawdown():
-    print("\n[테스트 11] Rebate Micro -0.20% 추매")
+def test_night_micro_averages_after_tick_drawdown():
+    print("\n[테스트 11] Night Micro 틱 기반 추매")
     print("-" * 60)
 
-    strategy = rebate_strategy()
+    strategy = night_strategy()
     now = datetime(2026, 5, 23, 9, 0, 1)
     closes = [
         100.00, 100.06, 100.02, 100.10, 100.15,
@@ -359,14 +397,43 @@ def test_rebate_micro_averages_after_020_pct_drawdown():
     assert decision.signal == Signal.BUY
     assert "controlled averaging" in decision.reason
     assert decision.order_krw == 20000
-    print("  ✓ -0.20% 이하 손실에서는 20,000원 고정 추매 신호")
+
+    second_add = strategy.generate_signal(
+        make_context(
+            now=now,
+            trade_price=2_980_000.0,
+            current_position=0.03,
+            avg_buy_price=3_000_000.0,
+            last_pulse_buy_at=now - timedelta(seconds=1),
+            closes=[3_000_000.0 - idx * 1000 for idx in range(10)],
+            tick_size_krw=1000.0,
+            averaging_count=1,
+        )
+    )
+    assert second_add.signal == Signal.BUY
+
+    max_adds_exit = strategy.generate_signal(
+        make_context(
+            now=now,
+            trade_price=2_980_000.0,
+            current_position=0.03,
+            avg_buy_price=3_000_000.0,
+            last_pulse_buy_at=now - timedelta(seconds=1),
+            closes=[3_000_000.0 - idx * 1000 for idx in range(10)],
+            tick_size_krw=1000.0,
+            averaging_count=2,
+        )
+    )
+    assert max_adds_exit.signal == Signal.SELL
+    assert "stop auto trade" in max_adds_exit.reason
+    print("  ✓ 1차는 10틱, 2차는 18틱 기준으로 최대 2회까지만 추매")
 
 
-def test_rebate_micro_sells_and_stops_when_averaging_cash_unavailable():
-    print("\n[테스트 12] Rebate Micro 추매 현금 부족 시 전량매도 종료")
+def test_night_micro_sells_and_stops_when_averaging_cash_unavailable():
+    print("\n[테스트 12] Night Micro 추매 현금 부족 시 전량매도 종료")
     print("-" * 60)
 
-    strategy = rebate_strategy()
+    strategy = night_strategy()
     now = datetime(2026, 5, 23, 9, 0, 1)
     decision = strategy.generate_signal(
         make_context(
@@ -385,11 +452,11 @@ def test_rebate_micro_sells_and_stops_when_averaging_cash_unavailable():
     print("  ✓ 추매할 현금이 최소 주문금액보다 작으면 전량매도 후 자동거래 종료 신호")
 
 
-def test_rebate_micro_reentry_guard_after_sell():
-    print("\n[테스트 13] Rebate Micro 재진입 가드")
+def test_night_micro_reentry_guard_after_sell():
+    print("\n[테스트 13] Night Micro 재진입 가드")
     print("-" * 60)
 
-    strategy = rebate_strategy()
+    strategy = night_strategy()
     now = datetime(2026, 5, 23, 9, 0, 1)
     trending = [
         100.00, 100.03, 100.01, 100.05, 100.09,
@@ -422,13 +489,13 @@ def main():
         test_pulse_takes_profit_from_live_ticker,
         test_pulse_stops_loss_from_live_ticker,
         test_pulse_does_not_exit_before_three_seconds,
-        test_rebate_micro_requires_micro_edge_before_entry,
-        test_rebate_micro_blocks_wide_spread_entry,
-        test_rebate_micro_requires_positive_post_rebate_ev,
-        test_rebate_micro_take_profit_and_hard_stop,
-        test_rebate_micro_averages_after_020_pct_drawdown,
-        test_rebate_micro_sells_and_stops_when_averaging_cash_unavailable,
-        test_rebate_micro_reentry_guard_after_sell,
+        test_night_micro_requires_micro_edge_before_entry,
+        test_night_micro_blocks_wide_spread_entry,
+        test_night_micro_requires_positive_post_rebate_ev,
+        test_night_micro_take_profit_and_hard_stop,
+        test_night_micro_averages_after_tick_drawdown,
+        test_night_micro_sells_and_stops_when_averaging_cash_unavailable,
+        test_night_micro_reentry_guard_after_sell,
     ]
 
     passed = 0

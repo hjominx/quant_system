@@ -798,7 +798,7 @@ class ControlPanelView(discord.ui.View):
         active_profile = self.controller.current_profile_mode()
         profile = active_profile if active_profile in ("rebate_micro", "night_micro") else "rebate_micro"
         if profile == "night_micro":
-            rule_text = "+0.15% 지정가 익절 / -0.20% 추매 / -0.70% 시장가 손절 / 지정가 7초 대기"
+            rule_text = "+0.10% 이상 AND 10틱 이상 지정가 익절 / 10틱·18틱 추매 / 30틱 시장가 손절 / 지정가 7초 대기"
         else:
             rule_text = "+0.30~0.50% 동적 익절 / -0.35% 손절"
         await interaction.response.send_message(

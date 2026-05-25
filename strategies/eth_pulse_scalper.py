@@ -59,8 +59,16 @@ class PulseScalperStrategy(BaseStrategy):
         params.setdefault("min_reward_to_risk", 0.0)
         params.setdefault("averaging_enabled", False)
         params.setdefault("averaging_trigger_pct", 0.0020)
+        params.setdefault("averaging_second_trigger_pct", params["averaging_trigger_pct"])
         params.setdefault("averaging_order_krw", 20_000)
         params.setdefault("averaging_max_adds", 0)
+        params.setdefault("tick_mode_enabled", False)
+        params.setdefault("take_profit_min_ticks", 0)
+        params.setdefault("averaging_min_ticks", 0)
+        params.setdefault("averaging_second_min_ticks", 0)
+        params.setdefault("stop_loss_min_ticks", 0)
+        params.setdefault("tick_band_min_10tick_pct", 0.0)
+        params.setdefault("tick_band_max_10tick_pct", 1.0)
         super().__init__(name="Pulse_Scalper", params=params)
 
     def _validate_params(self) -> None:
@@ -79,14 +87,22 @@ class PulseScalperStrategy(BaseStrategy):
         assert self.params["min_take_profit_after_cost_pct"] >= 0
         assert self.params["min_reward_to_risk"] >= 0
         assert self.params["averaging_trigger_pct"] > 0
+        assert self.params["averaging_second_trigger_pct"] > 0
         assert self.params["averaging_order_krw"] > 0
         assert self.params["averaging_max_adds"] >= 0
+        assert self.params["take_profit_min_ticks"] >= 0
+        assert self.params["averaging_min_ticks"] >= 0
+        assert self.params["averaging_second_min_ticks"] >= 0
+        assert self.params["stop_loss_min_ticks"] >= 0
+        assert self.params["tick_band_min_10tick_pct"] >= 0
+        assert self.params["tick_band_max_10tick_pct"] >= self.params["tick_band_min_10tick_pct"]
 
     def generate_signal(self, ctx: StrategyContext) -> TradeDecision:
         price = self._current_price(ctx)
         now = self._current_time(ctx)
         last_buy_at = self._last_pulse_buy_at(ctx)
         take_profit_pct = self._take_profit_pct(ctx)
+        stop_loss_pct = self._stop_loss_pct(ctx, price)
         seconds_since_buy = (
             None if last_buy_at is None else (now - last_buy_at).total_seconds()
         )
@@ -105,19 +121,35 @@ class PulseScalperStrategy(BaseStrategy):
                 return TradeDecision(
                     signal=Signal.SELL,
                     target_weight=0.0,
-                    reason=self._reason(ctx.ticker, "take-profit", price, pnl, seconds_since_buy, take_profit_pct),
+                    reason=self._reason(
+                        ctx.ticker,
+                        "take-profit",
+                        price,
+                        pnl,
+                        seconds_since_buy,
+                        take_profit_pct,
+                        stop_loss_pct,
+                    ),
                     confidence=1.0,
                     take_profit_pct=take_profit_pct,
-                    stop_loss_pct=-self.params["stop_loss_pct"],
+                    stop_loss_pct=-stop_loss_pct,
                 )
-            if exit_armed and pnl <= -self.params["stop_loss_pct"]:
+            if exit_armed and pnl <= -stop_loss_pct:
                 return TradeDecision(
                     signal=Signal.SELL,
                     target_weight=0.0,
-                    reason=self._reason(ctx.ticker, "stop-loss", price, pnl, seconds_since_buy, take_profit_pct),
+                    reason=self._reason(
+                        ctx.ticker,
+                        "stop-loss",
+                        price,
+                        pnl,
+                        seconds_since_buy,
+                        take_profit_pct,
+                        stop_loss_pct,
+                    ),
                     confidence=1.0,
                     take_profit_pct=take_profit_pct,
-                    stop_loss_pct=-self.params["stop_loss_pct"],
+                    stop_loss_pct=-stop_loss_pct,
                 )
             averaging = self._controlled_averaging_decision(
                 ctx,
@@ -125,6 +157,7 @@ class PulseScalperStrategy(BaseStrategy):
                 pnl=pnl,
                 seconds_since_buy=seconds_since_buy,
                 take_profit_pct=take_profit_pct,
+                stop_loss_pct=stop_loss_pct,
             )
             if averaging is not None:
                 return averaging
@@ -140,10 +173,11 @@ class PulseScalperStrategy(BaseStrategy):
                         pnl,
                         seconds_since_buy,
                         take_profit_pct,
+                        stop_loss_pct,
                     ),
                     confidence=1.0,
                     take_profit_pct=take_profit_pct,
-                    stop_loss_pct=-self.params["stop_loss_pct"],
+                    stop_loss_pct=-stop_loss_pct,
                 )
             return TradeDecision(
                 signal=Signal.HOLD,
@@ -155,6 +189,7 @@ class PulseScalperStrategy(BaseStrategy):
                     pnl,
                     seconds_since_buy,
                     take_profit_pct,
+                    stop_loss_pct,
                 ),
                 confidence=0.0,
             )
@@ -171,10 +206,11 @@ class PulseScalperStrategy(BaseStrategy):
                     0.0,
                     seconds_since_buy,
                     take_profit_pct,
+                    stop_loss_pct,
                 ),
                 confidence=1.0,
                 take_profit_pct=take_profit_pct,
-                stop_loss_pct=-self.params["stop_loss_pct"],
+                stop_loss_pct=-stop_loss_pct,
             )
 
         return TradeDecision(
@@ -187,6 +223,7 @@ class PulseScalperStrategy(BaseStrategy):
                 0.0,
                 seconds_since_buy,
                 take_profit_pct,
+                stop_loss_pct,
             ),
             confidence=0.0,
         )
@@ -235,6 +272,10 @@ class PulseScalperStrategy(BaseStrategy):
         if min(closes) <= 0:
             return False, "invalid price history"
 
+        tick_allowed, tick_reason = self._tick_band_allowed(ctx, self._current_price(ctx))
+        if not tick_allowed:
+            return False, tick_reason
+
         returns = [
             closes[idx] / closes[idx - 1] - 1
             for idx in range(1, len(closes))
@@ -279,8 +320,8 @@ class PulseScalperStrategy(BaseStrategy):
                 )
                 if not ev_allowed:
                     return False, ev_reason
-                return True, f"{setup} mom={momentum:.3%} vol={volatility:.3%} | {ev_reason}"
-            return True, f"{setup} mom={momentum:.3%} vol={volatility:.3%}"
+                return True, f"{setup} mom={momentum:.3%} vol={volatility:.3%} | {tick_reason} | {ev_reason}"
+            return True, f"{setup} mom={momentum:.3%} vol={volatility:.3%} | {tick_reason}"
         return False, f"no micro edge mom={momentum:.3%} vol={volatility:.3%}"
 
     def _positive_ev_allowed(
@@ -324,7 +365,7 @@ class PulseScalperStrategy(BaseStrategy):
                 f"TP after cost too thin {take_profit_after_cost:.3%}<{min_take_profit_after_cost:.3%}",
             )
 
-        effective_loss = float(self.params["stop_loss_pct"]) + max(round_trip_cost - rebate, 0.0)
+        effective_loss = self._stop_loss_pct(ctx, self._current_price(ctx)) + max(round_trip_cost - rebate, 0.0)
         reward_to_risk = take_profit_after_cost / effective_loss if effective_loss > 0 else float("inf")
         min_reward_to_risk = float(self.params["min_reward_to_risk"])
         if reward_to_risk < min_reward_to_risk:
@@ -344,15 +385,16 @@ class PulseScalperStrategy(BaseStrategy):
         pnl: float,
         seconds_since_buy: Optional[float],
         take_profit_pct: float,
+        stop_loss_pct: float,
     ) -> Optional[TradeDecision]:
         """Add once drawdown is intentional; exit and stop if no add is possible."""
         if not self.params["averaging_enabled"]:
             return None
-        trigger = float(self.params["averaging_trigger_pct"])
+        count = int(ctx.metadata.get("averaging_count", 0) or 0)
+        trigger = self._averaging_trigger_pct(ctx, price, count)
         if pnl > -trigger:
             return None
 
-        count = int(ctx.metadata.get("averaging_count", 0) or 0)
         max_adds = int(self.params["averaging_max_adds"])
         if max_adds > 0 and count >= max_adds:
             return TradeDecision(
@@ -365,10 +407,11 @@ class PulseScalperStrategy(BaseStrategy):
                     pnl,
                     seconds_since_buy,
                     take_profit_pct,
+                    stop_loss_pct,
                 ),
                 confidence=1.0,
                 take_profit_pct=take_profit_pct,
-                stop_loss_pct=-self.params["stop_loss_pct"],
+                stop_loss_pct=-stop_loss_pct,
             )
 
         order_krw = float(self.params["averaging_order_krw"])
@@ -388,10 +431,11 @@ class PulseScalperStrategy(BaseStrategy):
                     pnl,
                     seconds_since_buy,
                     take_profit_pct,
+                    stop_loss_pct,
                 ),
                 confidence=1.0,
                 take_profit_pct=take_profit_pct,
-                stop_loss_pct=-self.params["stop_loss_pct"],
+                stop_loss_pct=-stop_loss_pct,
             )
 
         return TradeDecision(
@@ -404,29 +448,119 @@ class PulseScalperStrategy(BaseStrategy):
                 pnl,
                 seconds_since_buy,
                 take_profit_pct,
+                stop_loss_pct,
             ),
             confidence=1.0,
             take_profit_pct=take_profit_pct,
-            stop_loss_pct=-self.params["stop_loss_pct"],
+            stop_loss_pct=-stop_loss_pct,
             order_krw=order_krw,
         )
 
     def _take_profit_pct(self, ctx: StrategyContext) -> float:
         closes = [float(value) for value in ctx.ohlcv["close"].tolist()]
         if len(closes) < 3:
-            return float(self.params["take_profit_min_pct"])
-        returns = [
-            closes[idx] / closes[idx - 1] - 1
-            for idx in range(1, len(closes))
-            if closes[idx - 1] > 0
-        ]
-        window = int(self.params["volatility_window"])
-        vol = pstdev(returns[-window:]) if len(returns) >= 2 else 0.0
-        raw_target = vol * float(self.params["take_profit_vol_multiplier"])
-        return max(
-            float(self.params["take_profit_min_pct"]),
-            min(float(self.params["take_profit_max_pct"]), raw_target),
+            base = float(self.params["take_profit_min_pct"])
+        else:
+            returns = [
+                closes[idx] / closes[idx - 1] - 1
+                for idx in range(1, len(closes))
+                if closes[idx - 1] > 0
+            ]
+            window = int(self.params["volatility_window"])
+            vol = pstdev(returns[-window:]) if len(returns) >= 2 else 0.0
+            raw_target = vol * float(self.params["take_profit_vol_multiplier"])
+            base = max(
+                float(self.params["take_profit_min_pct"]),
+                min(float(self.params["take_profit_max_pct"]), raw_target),
+            )
+        return self._tick_adjusted_pct(
+            ctx,
+            self._current_price(ctx),
+            base,
+            int(self.params["take_profit_min_ticks"]),
         )
+
+    def _stop_loss_pct(self, ctx: StrategyContext, price: float) -> float:
+        return self._tick_adjusted_pct(
+            ctx,
+            price,
+            float(self.params["stop_loss_pct"]),
+            int(self.params["stop_loss_min_ticks"]),
+        )
+
+    def _averaging_trigger_pct(self, ctx: StrategyContext, price: float, count: int) -> float:
+        if count <= 0:
+            return self._tick_adjusted_pct(
+                ctx,
+                price,
+                float(self.params["averaging_trigger_pct"]),
+                int(self.params["averaging_min_ticks"]),
+            )
+        return self._tick_adjusted_pct(
+            ctx,
+            price,
+            float(self.params["averaging_second_trigger_pct"]),
+            int(self.params["averaging_second_min_ticks"]),
+        )
+
+    def _tick_adjusted_pct(
+        self,
+        ctx: StrategyContext,
+        price: float,
+        base_pct: float,
+        min_ticks: int,
+    ) -> float:
+        if not self.params["tick_mode_enabled"] or min_ticks <= 0:
+            return base_pct
+        tick_pct = self._tick_pct(ctx, price)
+        if tick_pct <= 0:
+            return base_pct
+        return max(base_pct, tick_pct * min_ticks)
+
+    def _tick_band_allowed(self, ctx: StrategyContext, price: float) -> tuple[bool, str]:
+        if not self.params["tick_mode_enabled"]:
+            return True, "tick filter disabled"
+        tick_pct = self._tick_pct(ctx, price)
+        if tick_pct <= 0:
+            return False, "invalid tick size"
+        ten_tick_pct = tick_pct * 10
+        min_pct = float(self.params["tick_band_min_10tick_pct"])
+        max_pct = float(self.params["tick_band_max_10tick_pct"])
+        if ten_tick_pct < min_pct:
+            return False, f"10tick move too thin {ten_tick_pct:.3%}<{min_pct:.3%}"
+        if ten_tick_pct > max_pct:
+            return False, f"10tick move too wide {ten_tick_pct:.3%}>{max_pct:.3%}"
+        return True, f"tick10={ten_tick_pct:.3%}"
+
+    def _tick_pct(self, ctx: StrategyContext, price: float) -> float:
+        tick = ctx.metadata.get("tick_size_krw")
+        if tick is None:
+            tick = self._fallback_krw_tick_size(price)
+        tick = float(tick)
+        if price <= 0 or tick <= 0:
+            return 0.0
+        return tick / price
+
+    def _fallback_krw_tick_size(self, price: float) -> float:
+        if price < 1:
+            return 0.0001
+        if price < 10:
+            return 0.001
+        if price < 100:
+            return 0.01
+        if price < 5_000:
+            return 1.0
+        if price < 10_000:
+            return 5.0
+        if price < 50_000:
+            return 10.0
+        if price < 100_000:
+            return 50.0
+        if price < 500_000:
+            return 100.0
+        if price < 1_000_000:
+            return 500.0
+        return 1_000.0
 
     def _reason(
         self,
@@ -436,6 +570,7 @@ class PulseScalperStrategy(BaseStrategy):
         pnl: float,
         seconds_since_buy: Optional[float],
         take_profit_pct: float,
+        stop_loss_pct: Optional[float] = None,
     ) -> str:
         if seconds_since_buy is None:
             age = "never"
@@ -447,7 +582,7 @@ class PulseScalperStrategy(BaseStrategy):
             f"{ticker} {self.params['label']} {action} | price={price:.0f}, pnl={pnl:.3%}, "
             f"last_pulse_age={age}, interval={self.params['buy_interval_seconds']}s, "
             f"exit_after={self.params['min_exit_hold_seconds']}s, "
-            f"tp={take_profit_pct:.2%}, sl={self.params['stop_loss_pct']:.2%}"
+            f"tp={take_profit_pct:.2%}, sl={(stop_loss_pct or self.params['stop_loss_pct']):.2%}"
         )
 
 
