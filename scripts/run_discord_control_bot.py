@@ -862,8 +862,9 @@ class ControlPanelView(discord.ui.View):
                 ephemeral=True,
             )
         except Exception as exc:
+            tb = traceback.format_exc()
             await interaction.followup.send(
-                f"시장 목록 조회 실패: `{type(exc).__name__}: {exc}`",
+                f"시장 목록 조회 실패: `{type(exc).__name__}: {exc}`\n```\n{tb[-1500:]}\n```",
                 ephemeral=True,
             )
 
