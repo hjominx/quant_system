@@ -14,6 +14,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import traceback
 from datetime import datetime
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
@@ -696,8 +697,9 @@ class ControlPanelView(discord.ui.View):
                 ephemeral=True,
             )
         except Exception as exc:
+            tb = traceback.format_exc()
             await interaction.followup.send(
-                f"종목 추천 실패: `{type(exc).__name__}: {exc}`",
+                f"종목 추천 실패: `{type(exc).__name__}: {exc}`\n```\n{tb[-1500:]}\n```",
                 ephemeral=True,
             )
 

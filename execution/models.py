@@ -158,7 +158,7 @@ class Ticker:
             signed_change_rate=_to_decimal(data.get('signed_change_rate')),
             acc_trade_volume_24h=_to_decimal(data.get('acc_trade_volume_24h')),
             acc_trade_price_24h=_to_decimal(data.get('acc_trade_price_24h')),
-            timestamp=int(data.get('timestamp', 0)),
+            timestamp=int(data.get('timestamp') or 0),
             raw_data=data,
         )
 
@@ -199,7 +199,7 @@ class Candle:
             trade_price=_to_decimal(data.get('trade_price')),
             candle_acc_trade_volume=_to_decimal(data.get('candle_acc_trade_volume')),
             candle_acc_trade_price=_to_decimal(data.get('candle_acc_trade_price')),
-            timestamp=int(data.get('timestamp', 0)),
+            timestamp=int(data.get('timestamp') or 0),
             raw_data=data,
         )
 
@@ -335,7 +335,7 @@ class Order:
             executed_volume=_to_decimal(data.get('executed_volume')),
             paid_fee=_to_decimal(data.get('paid_fee')),
             locked=_to_decimal(data.get('locked')),
-            trades_count=int(data.get('trades_count', 0)),
+            trades_count=int(data.get('trades_count') or 0),
             created_at=_parse_datetime(data.get('created_at')),
             raw_data=data,
         )
@@ -401,7 +401,7 @@ class Orderbook:
     def from_dict(cls, data: Dict[str, Any]) -> 'Orderbook':
         return cls(
             market=data['market'],
-            timestamp=int(data.get('timestamp', 0)),
+            timestamp=int(data.get('timestamp') or 0),
             total_ask_size=_to_decimal(data.get('total_ask_size')),
             total_bid_size=_to_decimal(data.get('total_bid_size')),
             units=[OrderbookUnit.from_dict(u) for u in data.get('orderbook_units', [])],
