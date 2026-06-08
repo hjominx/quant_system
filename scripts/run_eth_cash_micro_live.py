@@ -35,6 +35,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from execution.bithumb_client import BithumbClient
+from execution.errors import AuthenticationError
 from execution.models import Balances, Candle, Order, Orderbook, OrderSide
 from notifications.discord import (
     COLOR_DANGER,
@@ -2015,6 +2016,15 @@ def main() -> None:
                         dry_run=dry_run,
                         notify_dry_run=args.notify_dry_run,
                     )
+                # 인증 실패는 재시도해도 동일하므로 루프를 즉시 중단한다.
+                # (예: 회원탈퇴/키 삭제로 API 키가 무효화된 경우 invalid_access_key)
+                if isinstance(exc, AuthenticationError):
+                    print(
+                        "\n[중단] 인증 실패는 재시도 대상이 아닙니다. "
+                        ".env의 BITHUMB_API_KEY / BITHUMB_SECRET_KEY가 "
+                        "유효한 계정의 키인지 확인하세요."
+                    )
+                    raise
                 if not args.loop:
                     raise
 
